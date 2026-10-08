@@ -73,6 +73,12 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
+// isExplicitJSON is a JSON request content type. Unlike a response, a request
+// with no content type is not taken as JSON.
+func isExplicitJSON(contentType string) bool {
+	return contentType != "" && isJSONContentType(contentType)
+}
+
 // verifySession checks the token in a session response: signed by the auth API,
 // of the expected type, and belonging to the subject the body names. It returns
 // the session id. A response that fails any of these is one this adapter cannot
@@ -139,17 +145,23 @@ func (a *Adapter) manifestRoute(r *http.Request, match routeMatch, bearer bool) 
 		return errorResult(http.StatusNotFound, "not_found")
 	}
 
-	cred, rejected := a.credentialFor(r, route.Credential, bearer)
-	if rejected != nil {
-		return *rejected
-	}
-
 	body, err := readRequestBody(r)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
 			return errorResult(http.StatusRequestEntityTooLarge, "payload_too_large")
 		}
 		return errorResult(http.StatusBadRequest, "bad_request")
+	}
+	// The body goes upstream as JSON, so it has to be JSON. A cross-site form can
+	// send a text/plain body shaped like JSON with no CORS preflight; read as JSON,
+	// that would be a sign-in the victim never made.
+	if body != nil && !isExplicitJSON(r.Header.Get("Content-Type")) {
+		return errorResult(http.StatusUnsupportedMediaType, "unsupported_media_type")
+	}
+
+	cred, rejected := a.credentialFor(r, route.Credential, bearer)
+	if rejected != nil {
+		return *rejected
 	}
 
 	external := route.Delivery && a.opts.Deliver != nil

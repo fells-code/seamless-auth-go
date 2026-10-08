@@ -32,26 +32,33 @@ var errUnauthenticated = errors.New("unauthenticated")
 // any route. It does not refresh: silent refresh belongs to the auth routes, and a
 // bearer client refreshes through POST /refresh itself.
 func (a *Adapter) Authenticate(r *http.Request) (*User, error) {
+	user, _, err := a.authenticate(r)
+	return user, err
+}
+
+// authenticate is Authenticate, also reporting whether the session came from the
+// cookie, which a browser attaches on its own.
+func (a *Adapter) authenticate(r *http.Request) (*User, bool, error) {
 	if c, err := r.Cookie(a.opts.AccessCookieName); err == nil && c.Value != "" {
 		claims, ok := a.readCookie(r, a.opts.AccessCookieName, kindAccess)
 		token := stringClaim(claims, "token")
 		if !ok || stringClaim(claims, "sub") == "" || !isAccessToken(token) {
-			return nil, errUnauthenticated
+			return nil, true, errUnauthenticated
 		}
-		return userFrom(claims, token), nil
+		return userFrom(claims, token), true, nil
 	}
 
 	token := bearerToken(r)
 	if token == "" {
-		return nil, errUnauthenticated
+		return nil, false, errUnauthenticated
 	}
 	claims, err := a.jwks.verifyAuthToken(r.Context(), token, a.opts.AuthServerIssuer, a.opts.Audience)
 	// An ephemeral sign-in token is signed by the same key, so the type is what
 	// keeps it from passing for a session.
 	if err != nil || stringClaim(claims, "typ") != "access" || stringClaim(claims, "sub") == "" {
-		return nil, errUnauthenticated
+		return nil, false, errUnauthenticated
 	}
-	return userFrom(claims, token), nil
+	return userFrom(claims, token), false, nil
 }
 
 // isAccessToken reads the type of the auth API token inside a session cookie. It
@@ -80,13 +87,22 @@ func userFrom(claims map[string]any, token string) *User {
 }
 
 // RequireAuth answers 401 unless the request carries a valid session, and puts
-// the user on the request context for next.
+// the user on the request context for next. A cookie session is refused with 403
+// for a cross-site state change, as on the auth routes.
 func (a *Adapter) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, err := a.Authenticate(r)
+		user, byCookie, err := a.authenticate(r)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthenticated"})
 			return
+		}
+		// A cookie session gets the same cross-site check as the auth routes, or a
+		// form on another site could act as the user.
+		if byCookie {
+			if res, blocked := a.checkOrigin(r); blocked {
+				a.write(w, res, false)
+				return
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
 	})

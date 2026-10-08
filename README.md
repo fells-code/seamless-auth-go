@@ -86,6 +86,19 @@ both are present. It reads the `Cookie` header itself, so it works on any route.
 refresh: the auth routes refresh a browser session silently, and a bearer client calls
 `POST /auth/refresh` itself. `Authenticate` does the same check without answering.
 
+A request `RequireAuth` admits on the session cookie also gets the auth routes' cross-site
+check: while cookies are `SameSite=None`, a state-changing request from another site
+(`Sec-Fetch-Site: cross-site`, or an `Origin` outside `AllowedOrigins`) answers 403
+`cross_site_request_blocked`. A bearer token is never attached by a browser, so it is not
+checked. `Authenticate` makes no such check.
+
+### Request bodies
+
+The auth routes forward a request body to the auth API as JSON, so a body must be sent as
+`application/json` (or a `+json` type). Anything else answers 415 `unsupported_media_type`: a
+cross-site form can post a `text/plain` body shaped like JSON with no CORS preflight, and read as
+JSON it would be a sign-in the user never made. The client SDKs already send JSON.
+
 ## Options
 
 | Option | Default | Purpose |
