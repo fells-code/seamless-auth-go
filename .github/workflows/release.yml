@@ -1,0 +1,71 @@
+name: release
+
+# Changesets, as in the other seamless-* repos. A push to main with pending
+# changesets opens or updates the "chore: version packages" pull request. Once it
+# merges, the version in package.json has no GitHub release yet, and this run
+# tags it and publishes one (scripts/release.sh).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'fells-code/seamless-auth-go'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+
+      - name: Version pull request
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: npm run version-packages
+          title: 'chore: version packages'
+          commit: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find an unreleased version
+        id: pending
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checks
+        if: steps.pending.outputs.release == 'true'
+        run: |
+          test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: Release
+        if: steps.pending.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run release

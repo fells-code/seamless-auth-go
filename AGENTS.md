@@ -52,6 +52,7 @@ guidance may extend them but must not contradict them.
 | Vet | `go vet ./...` |
 | Tests | `go test -race ./...` |
 | Conformance | see README, "Conformance" |
+| Changeset | `npx changeset status` (a user-facing change needs one) |
 
 The module targets Go 1.22. Do not use standard library APIs newer than that (CI runs 1.22).
 
@@ -84,3 +85,15 @@ is the arbiter: change the suite deliberately, never the adapter quietly.
 
 Go modules release by git tag (`vX.Y.Z`). Pre-1.0: a breaking change is a minor bump, and 1.0 is
 a deliberate decision, not a side effect.
+
+Releases go through changesets, as in the other seamless-* repos. Do not tag by hand.
+
+1. A pull request that changes what adopters get adds a changeset (`npx changeset`). Its summary
+   is the release note.
+2. On merge, `.github/workflows/release.yml` opens or updates the `chore: version packages` pull
+   request, which bumps `package.json` and `CHANGELOG.md`.
+3. Merging that pull request tags `vX.Y.Z` and publishes the GitHub release (`scripts/release.sh`).
+
+`package.json` exists only for this tooling and to hold the version. It is not a dependency of
+the module, which stays standard library only. A v2 needs the module path to end in `/v2` first,
+and the release script refuses one that does not.
