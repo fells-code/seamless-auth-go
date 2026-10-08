@@ -202,6 +202,9 @@ func do(t *testing.T, a *Adapter, method, target string, body string, setup ...f
 		reader = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, target, reader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for _, s := range setup {
 		s(req)
 	}
@@ -222,4 +225,8 @@ func withCookie(c *http.Cookie) func(*http.Request) {
 
 func withHeader(k, v string) func(*http.Request) {
 	return func(r *http.Request) { r.Header.Set(k, v) }
+}
+
+func withoutHeader(k string) func(*http.Request) {
+	return func(r *http.Request) { r.Header.Del(k) }
 }

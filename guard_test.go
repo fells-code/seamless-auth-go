@@ -3,6 +3,7 @@ package seamlessauth
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,37 @@ func TestRequireAuth(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if rec := call(h, c.setup); rec.Code != c.status {
 				t.Fatalf("status %d, want %d: %s", rec.Code, c.status, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestACookieSessionIsRefusedForCrossSiteStateChanges(t *testing.T) {
+	api := newFakeAPI(t)
+	h := guarded(newTestAdapter(t, api))
+	token := signRS256(t, map[string]any{"sub": "u1", "typ": "access", "iss": api.server.URL, "aud": api.server.URL})
+	cookie := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": token}))
+	post := func(r *http.Request) { r.Method = http.MethodPost }
+
+	cases := []struct {
+		name   string
+		setup  []func(*http.Request)
+		status int
+	}{
+		{"cookie, cross-site", []func(*http.Request){post, cookie, withHeader("Sec-Fetch-Site", "cross-site")}, 403},
+		{"cookie, same-origin", []func(*http.Request){post, cookie, withHeader("Sec-Fetch-Site", "same-origin")}, 200},
+		{"cookie, cross-site read", []func(*http.Request){cookie, withHeader("Sec-Fetch-Site", "cross-site")}, 200},
+		// A bearer token is never attached by a browser, so it needs no such check.
+		{"bearer, cross-site", []func(*http.Request){post, withHeader("Authorization", "Bearer "+token), withHeader("Sec-Fetch-Site", "cross-site")}, 200},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := call(h, c.setup...)
+			if rec.Code != c.status {
+				t.Fatalf("status %d, want %d: %s", rec.Code, c.status, rec.Body.String())
+			}
+			if c.status == 403 && !strings.Contains(rec.Body.String(), "cross_site_request_blocked") {
+				t.Fatalf("body %s", rec.Body.String())
 			}
 		})
 	}

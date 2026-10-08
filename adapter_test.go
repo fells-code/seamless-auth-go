@@ -320,6 +320,45 @@ func TestCrossSiteStateChangesAreBlocked(t *testing.T) {
 	}
 }
 
+func TestABodyThatIsNotJSONIsRefusedBeforeAnythingIsSpent(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api, func(o *Options) { o.InsecureCookies = true })
+	refresh := withCookie(signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"}))
+	// What a cross-site form with enctype="text/plain" sends.
+	forged := `{"code":"attacker","state":"attacker","x":"="}`
+
+	for _, c := range []struct {
+		target string
+		setup  []func(*http.Request)
+	}{
+		{"/oauth/mock/callback", []func(*http.Request){withHeader("Content-Type", "text/plain")}},
+		{"/oauth/mock/callback", []func(*http.Request){withoutHeader("Content-Type")}},
+		{"/oauth/mock/callback", []func(*http.Request){withHeader("Content-Type", "application/x-www-form-urlencoded")}},
+		{"/users/credentials", []func(*http.Request){withHeader("Content-Type", "text/plain"), refresh}},
+	} {
+		if r := do(t, a, "POST", c.target, forged, c.setup...); r.status != http.StatusUnsupportedMediaType || r.body["error"] != "unsupported_media_type" {
+			t.Fatalf("%s: status %d body %v", c.target, r.status, r.body)
+		}
+	}
+	if n := len(api.callsTo("POST", "/oauth/mock/callback")); n != 0 {
+		t.Fatalf("forwarded %d forged callbacks", n)
+	}
+	if n := len(api.callsTo("POST", "/refresh")); n != 0 {
+		t.Fatalf("a refused body spent the refresh token %d times", n)
+	}
+
+	api.on("POST", "/oauth/mock/callback", respond(400, map[string]any{"error": "invalid_request"}))
+	if r := do(t, a, "POST", "/oauth/mock/callback", `{}`, withHeader("Content-Type", "application/json; charset=utf-8")); r.status != 400 {
+		t.Fatalf("JSON body: status %d", r.status)
+	}
+	// No body needs no content type.
+	api.on("GET", "/users/me", respond(200, map[string]any{"user": map[string]any{}}))
+	access := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": "t"}))
+	if r := do(t, a, "GET", "/users/me", "", access); r.status != 200 {
+		t.Fatalf("no body: status %d", r.status)
+	}
+}
+
 func TestTheLiveManifestAddsRoutes(t *testing.T) {
 	api := newFakeAPI(t)
 	api.manifest = &Manifest{SchemaVersion: 1, Routes: []ManifestRoute{{Method: "GET", Path: "/brand-new/{id}", Credential: "access"}}}
