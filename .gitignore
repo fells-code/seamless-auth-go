@@ -1,0 +1,4 @@
+/refapp
+*.test
+*.out
+coverage.*
