@@ -146,6 +146,21 @@ Deliver: func(ctx context.Context, d seamlessauth.Delivery) error {
 
 A delivery error answers the request with 502 `delivery_failed`.
 
+### The admin console
+
+`ConsoleHandler` serves the Seamless admin dashboard from your API, proxied from the auth API, so
+it shares the origin and cookie scope of the `/auth` routes:
+
+```go
+mux.Handle("/console/", http.StripPrefix("/console", auth.ConsoleHandler()))
+```
+
+It serves `GET` and `HEAD` only and forwards nothing but the method and path, so the browser's
+cookies never reach the upstream. It refuses any path that could leave the console (dot segments,
+encoded separators), and follows a redirect only while it stays inside the console on the auth API.
+When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
+started in the console verify.
+
 ## The manifest
 
 On its first request the adapter fetches `/.well-known/seamless-adapter.json` from the auth API

@@ -65,6 +65,7 @@ The module targets Go 1.22. Do not use standard library APIs newer than that (CI
   logout.
 - `manifest.go`: parsing, matching, the live and embedded manifest.
 - `guard.go`: `RequireAuth`, `Authenticate`.
+- `console.go`: `ConsoleHandler`, the admin dashboard proxy.
 - `jwt.go`, `jwks.go`, `servicetoken.go`: HS256 cookies and service tokens, RS256 against the
   API's JWKS.
 - `conformance/refapp`: the reference app for the conformance suite. A test fixture.
