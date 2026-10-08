@@ -1,4 +1,4 @@
-# seamless-auth-go
+# Changelog
 
 ## 0.1.0
 
