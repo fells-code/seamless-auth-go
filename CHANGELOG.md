@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/fells-code/seamless-auth-go/compare/v0.1.0...v0.2.0) (2026-10-08)
+
+
+### Added
+
+* serve the admin console through ConsoleHandler ([#3](https://github.com/fells-code/seamless-auth-go/issues/3)) ([fa3fd66](https://github.com/fells-code/seamless-auth-go/commit/fa3fd66ed96f194cafd4f3d1c68148dfa7459907))
+
 ## 0.1.0
 
 The first release: a Seamless Auth server adapter for `net/http`, standard library only.
