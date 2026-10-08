@@ -1,0 +1,52 @@
+# Releases with release-please (configured in release-please-config.json).
+#
+# On every push to main, release-please opens or updates a release PR with the
+# next version and changelog, worked out from Conventional Commits since the last
+# release. Merging it tags vX.Y.Z and creates the GitHub release. A Go module is
+# released by its tag, so there is nothing to publish beyond that.
+#
+# Release PRs are opened with the default GITHUB_TOKEN, so CI does not run on
+# them. They change only the changelog and the manifest, and this job runs the
+# checks before release-please tags anything.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: github.repository == 'fells-code/seamless-auth-go'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Checks
+        run: |
+          test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+          go vet ./...
+          go test -race -count=1 ./...
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      # The first `go get` of a new version otherwise waits on the proxy fetching it.
+      - name: Warm the module proxy
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: curl -fsS "https://proxy.golang.org/github.com/fells-code/seamless-auth-go/@v/$TAG.info"
