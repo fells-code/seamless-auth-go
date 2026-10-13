@@ -26,7 +26,8 @@ type Options struct {
 	// CookieSecret signs the session cookies. At least 32 characters.
 	CookieSecret string
 	// ServiceSecret signs the service tokens the auth API trusts this adapter by.
-	// It is the API's API_SERVICE_TOKEN. At least 32 characters.
+	// It holds the same value as the API's API_SERVICE_TOKEN; apps conventionally
+	// read it from SEAMLESS_SERVICE_TOKEN. At least 32 characters.
 	ServiceSecret string
 	// JWKSKid is the kid header on service tokens.
 	JWKSKid string

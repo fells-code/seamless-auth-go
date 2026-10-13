@@ -33,7 +33,7 @@ func main() {
 		AuthServerURL:    os.Getenv("AUTH_SERVER_URL"),
 		AuthServerIssuer: os.Getenv("AUTH_SERVER_ISSUER"),
 		CookieSecret:     os.Getenv("COOKIE_SIGNING_KEY"),
-		ServiceSecret:    os.Getenv("API_SERVICE_TOKEN"),
+		ServiceSecret:    os.Getenv("SEAMLESS_SERVICE_TOKEN"),
 		JWKSKid:          os.Getenv("JWKS_KID"),
 		Deliver: func(_ context.Context, d seamlessauth.Delivery) error {
 			mu.Lock()
