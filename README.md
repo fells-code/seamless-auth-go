@@ -43,8 +43,8 @@ import (
 func main() {
 	auth, err := seamlessauth.New(seamlessauth.Options{
 		AuthServerURL: os.Getenv("AUTH_SERVER_URL"),
-		CookieSecret:  os.Getenv("COOKIE_SECRET"),   // at least 32 characters
-		ServiceSecret: os.Getenv("SERVICE_SECRET"),  // the API's API_SERVICE_TOKEN
+		CookieSecret:  os.Getenv("COOKIE_SECRET"),          // at least 32 characters
+		ServiceSecret: os.Getenv("SEAMLESS_SERVICE_TOKEN"), // same value as the API's API_SERVICE_TOKEN
 		JWKSKid:       os.Getenv("JWKS_KID"),
 	})
 	if err != nil {
@@ -65,6 +65,9 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
 ```
+
+The auth server reads the service token from `API_SERVICE_TOKEN` and your app reads it from
+`SEAMLESS_SERVICE_TOKEN`; both hold the same value.
 
 With other routers:
 
@@ -107,7 +110,7 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `AuthServerIssuer` | `AuthServerURL` | Expected `iss` of the API's tokens, when it differs from the URL you reach it at |
 | `Audience` | `AuthServerIssuer` | Expected `aud` of the API's tokens |
 | `CookieSecret` | required | Signs the session cookies (32 characters or more) |
-| `ServiceSecret` | required | The API's `API_SERVICE_TOKEN` (32 characters or more) |
+| `ServiceSecret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 characters or more) |
 | `JWKSKid` | `dev-main` | `kid` header on service tokens |
 | `CookieDomain` | none | Cookie `Domain` |
 | `InsecureCookies` | `false` | Drops `Secure`, for local development over HTTP |
@@ -176,7 +179,7 @@ need Docker, a checkout of `seamless-auth-api` and the `seamless` CLI:
 
 ```bash
 PORT=8080 AUTH_SERVER_URL=http://localhost:5312 AUTH_SERVER_ISSUER=http://auth-api:5312 \
-  API_SERVICE_TOKEN=verify-dev-service-token-not-a-real-secret \
+  SEAMLESS_SERVICE_TOKEN=verify-dev-service-token-not-a-real-secret \
   COOKIE_SIGNING_KEY=verify-dev-service-token-not-a-real-secret JWKS_KID=dev-main \
   go run ./conformance/refapp &
 
