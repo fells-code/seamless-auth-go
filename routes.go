@@ -65,6 +65,29 @@ func (a *Adapter) credentialFor(r *http.Request, kind string, bearer bool) (cred
 	return credential{}, &res
 }
 
+// The auth API consumes a magic link on the device that requested it, which it
+// recognises by that flow's pre-auth token. The token is optional: without it
+// the API asks for confirmation instead, so its absence is never a 401 here.
+const magicLinkVerifyPath = "/magic-link/verify/{token}"
+
+func isMagicLinkVerify(route ManifestRoute) bool {
+	return route.Method == http.MethodGet && route.Path == magicLinkVerifyPath
+}
+
+func (a *Adapter) optionalPreAuth(r *http.Request, bearer bool) credential {
+	if bearer {
+		if token := bearerToken(r); token != "" {
+			return credential{authorization: "Bearer " + token}
+		}
+		return credential{}
+	}
+	payload, valid := a.readCookie(r, a.opts.cookieName("preAuth"), cookieKind("preAuth"))
+	if token := stringClaim(payload, "token"); valid && token != "" {
+		return credential{authorization: "Bearer " + token}
+	}
+	return credential{}
+}
+
 func bearerToken(r *http.Request) string {
 	header := r.Header.Get("Authorization")
 	if len(header) > 7 && strings.EqualFold(header[:7], "bearer ") {
@@ -159,9 +182,15 @@ func (a *Adapter) manifestRoute(r *http.Request, match routeMatch, bearer bool) 
 		return errorResult(http.StatusUnsupportedMediaType, "unsupported_media_type")
 	}
 
-	cred, rejected := a.credentialFor(r, route.Credential, bearer)
-	if rejected != nil {
-		return *rejected
+	var cred credential
+	if isMagicLinkVerify(route) {
+		cred = a.optionalPreAuth(r, bearer)
+	} else {
+		var rejected *result
+		cred, rejected = a.credentialFor(r, route.Credential, bearer)
+		if rejected != nil {
+			return *rejected
+		}
 	}
 
 	external := route.Delivery && a.opts.Deliver != nil
