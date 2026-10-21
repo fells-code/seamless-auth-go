@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/fells-code/seamless-auth-go/compare/v0.2.1...v0.2.2) (2026-10-21)
+
+
+### Documentation
+
+* link the governance document and license pledge ([fa4a70f](https://github.com/fells-code/seamless-auth-go/commit/fa4a70f65e8d7d4bc7473787923dfcd102ffba11))
+* link the governance document and license pledge ([73f03a1](https://github.com/fells-code/seamless-auth-go/commit/73f03a13498cd409f0c7e04be072461e5466f8dc))
+
 ## [0.2.1](https://github.com/fells-code/seamless-auth-go/compare/v0.2.0...v0.2.1) (2026-10-18)
 
 
