@@ -89,6 +89,20 @@ both are present. It reads the `Cookie` header itself, so it works on any route.
 refresh: the auth routes refresh a browser session silently, and a bearer client calls
 `POST /auth/refresh` itself. `Authenticate` does the same check without answering.
 
+### Recovery sessions
+
+Redeeming an account recovery code issues a recovery session: its access token carries
+`recovery: true`, and the auth API lets it do little more than enroll a new passkey or
+authenticator app. `RequireAuth` refuses one with 403 `enrollment_required`, and `Authenticate`
+returns `ErrEnrollmentRequired`, so your app never treats a half-recovered account as signed
+in. Set `AllowRecoverySessions` to admit them; `User.Recovery` then marks one.
+
+Enrolling lifts the restriction, but the token keeps its claim until it is refreshed. In cookie
+transport the adapter refreshes the session itself after a successful
+`POST /webauthn/register/finish` or `POST /totp/enroll/verify` from a recovery session, so the
+new access cookie no longer carries it. A bearer client holds its own refresh token: it calls
+`POST /auth/refresh` after enrolling.
+
 A request `RequireAuth` admits on the session cookie also gets the auth routes' cross-site
 check: while cookies are `SameSite=None`, a state-changing request from another site
 (`Sec-Fetch-Site: cross-site`, or an `Origin` outside `AllowedOrigins`) answers 403
@@ -109,19 +123,25 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `AuthServerURL` | required | Where the adapter reaches the auth API |
 | `AuthServerIssuer` | `AuthServerURL` | Expected `iss` of the API's tokens, when it differs from the URL you reach it at |
 | `Audience` | `AuthServerIssuer` | Expected `aud` of the API's tokens |
-| `CookieSecret` | required | Signs the session cookies (32 characters or more) |
-| `ServiceSecret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 characters or more) |
+| `CookieSecret` | required | Signs the session cookies (32 characters or more, and not a placeholder from the examples) |
+| `ServiceSecret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 characters or more, and not a placeholder) |
 | `JWKSKid` | `dev-main` | `kid` header on service tokens |
 | `CookieDomain` | none | Cookie `Domain` |
-| `InsecureCookies` | `false` | Drops `Secure`, for local development over HTTP |
+| `InsecureCookies` | `false` | Drops `Secure`, for local development over HTTP. Also lets placeholder secrets through, with a warning |
 | `CookieSameSite` | `None`, or `Lax` with `InsecureCookies` | Cookie `SameSite` |
 | `AllowedOrigins` | none | The only cross-origin callers allowed to change state while cookies are `SameSite=None` |
 | `AccessCookieName`, `RefreshCookieName` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `RegistrationCookieName`, `PreAuthCookieName` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `Deliver` | none | Sends OTP codes and magic links through your own transports |
+| `DeliverAccountNotices` | `false` | `Deliver` also sends account notices. See below |
+| `AllowRecoverySessions` | `false` | `RequireAuth` admits a recovery session |
 | `ResolveClientIP` | the connecting peer | The end user's address. See below |
 | `DisableManifestFetch` | `false` | Use only the manifest bundled with this version |
-| `HTTPClient`, `Logf` | defaults | Outbound client and logger |
+| `HTTPClient`, `Logf` | defaults | Outbound client and logger. The client never follows a redirect: a supplied one is copied with a `CheckRedirect` that refuses them, and gets a 15 second timeout if it has none |
+
+`New` refuses an `AuthServerURL` that is not `http` or `https`, and the known placeholder secrets
+(`dev-only-cookie-signing-key-replace-me`, `GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV`, anything
+containing `replace-me`) unless `InsecureCookies` is set.
 
 ### Client IP
 
@@ -147,7 +167,24 @@ Deliver: func(ctx context.Context, d seamlessauth.Delivery) error {
 },
 ```
 
-A delivery error answers the request with 502 `delivery_failed`.
+A delivery error answers the request with 502 `delivery_failed`. `d.Kind` is one of the
+`Delivery*` constants; a kind this version does not know is logged and not handed to you. A code
+with `d.Purpose == seamlessauth.PurposeAccountRecovery` recovers an account rather than signing
+in: word it as a warning that someone asked to recover the account.
+
+#### Account notices
+
+Opening an account recovery request (`POST /recovery/verify`, marked `notices` in the manifest)
+tells the owner at every verified address, with a link to cancel it. By default the auth API
+sends these notices itself, even when you set `Deliver`. Set `DeliverAccountNotices` once your
+`Deliver` sends `account_notice_email` (`Subject`, `Text`) and `account_notice_sms` (`Text`):
+the adapter then asks for them and hands each one to you. The API counts a notice it hands
+back as the owner being told, so set it only when both kinds really go out.
+
+`d.CancelURL` carries a credential: send it to `d.To` only, and never log it. A `Delivery`
+prints without its code or links. If at least one notice is sent, the request answers as usual.
+If none is, the adapter cancels the recovery request with the cancel link's token and answers
+503 `recovery_notice_failed`, as the API does when it cannot notify the owner itself.
 
 ### Magic links
 
@@ -173,7 +210,8 @@ mux.Handle("/console/", http.StripPrefix("/console", auth.ConsoleHandler()))
 ```
 
 It serves `GET` and `HEAD` only and forwards nothing but the method and path, so the browser's
-cookies never reach the upstream. It refuses any path that could leave the console (dot segments,
+cookies never reach the upstream. The API's `X-Frame-Options`, `Content-Security-Policy` and
+`X-Content-Type-Options` come back with the console, so it cannot be framed on your origin. It refuses any path that could leave the console (dot segments,
 encoded separators), and follows a redirect only while it stays inside the console on the auth API.
 When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
 started in the console verify.

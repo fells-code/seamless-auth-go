@@ -80,14 +80,26 @@ func (a *Adapter) silentRefresh(r *http.Request) (map[string]any, []cookieWrite,
 		return nil, nil, errNoRefreshCookie
 	}
 
-	outcome := a.refreshes.do("cookie:"+c.Value, func() refreshOutcome {
+	return a.refreshSession(r, "cookie:"+c.Value, func() (string, string) {
 		payload, ok := a.readCookie(r, a.opts.RefreshCookieName, kindRefresh)
-		refreshToken := stringClaim(payload, "refreshToken")
-		if !ok || refreshToken == "" {
+		if !ok {
+			return "", ""
+		}
+		return stringClaim(payload, "sub"), stringClaim(payload, "refreshToken")
+	})
+}
+
+// refreshSession rotates a refresh token once per key, as refresher.do shares it,
+// and builds the cookies for the session it returns. held is read only by the
+// caller that makes the call.
+func (a *Adapter) refreshSession(r *http.Request, key string, held func() (sub, refreshToken string)) (map[string]any, []cookieWrite, error) {
+	outcome := a.refreshes.do(key, func() refreshOutcome {
+		sub, refreshToken := held()
+		if refreshToken == "" {
 			return refreshOutcome{err: errors.New("invalid refresh cookie")}
 		}
 
-		service, err := a.tokens.sign(stringClaim(payload, "sub"), map[string]any{"refreshToken": refreshToken})
+		service, err := a.tokens.sign(sub, map[string]any{"refreshToken": refreshToken})
 		if err != nil {
 			return refreshOutcome{err: err}
 		}
@@ -179,6 +191,7 @@ func (a *Adapter) logoutRoute(r *http.Request, bearer bool, path string) result 
 
 	cred, rejected := a.credentialFor(r, "access", bearer)
 	if rejected != nil {
+		rejected.clear = clears
 		return *rejected
 	}
 
@@ -189,6 +202,7 @@ func (a *Adapter) logoutRoute(r *http.Request, bearer bool, path string) result 
 		service:       a.tokens.proxyAuthorization(),
 	})
 	if err != nil {
+		a.opts.Logf("[seamless-auth] DELETE %s: %v", path, upstreamError(err))
 		return result{status: http.StatusBadGateway, body: map[string]any{"error": "upstream_unavailable"}, clear: clears}
 	}
 	res.Body.Close()

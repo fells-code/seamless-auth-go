@@ -16,7 +16,12 @@ const (
 	consoleMaxRedirects    = 5
 )
 
-var consoleResponseHeaders = []string{"Content-Type", "Cache-Control", "ETag", "Last-Modified"}
+// The framing and sniffing headers keep the console from being framed on the
+// application's origin.
+var consoleResponseHeaders = []string{
+	"Content-Type", "Cache-Control", "ETag", "Last-Modified",
+	"X-Frame-Options", "Content-Security-Policy", "X-Content-Type-Options",
+}
 
 // ConsoleHandler reverse-proxies the Seamless admin dashboard from the auth API,
 // so it loads from the same origin as the cookie-based auth routes. Mount it at

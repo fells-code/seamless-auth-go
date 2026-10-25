@@ -15,13 +15,15 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
 const (
-	transportHeader    = "X-Seamless-Auth-Transport"
-	deliveryModeHeader = "X-Seamless-Auth-Delivery-Mode"
-	maxBodyBytes       = 1 << 20
+	transportHeader     = "X-Seamless-Auth-Transport"
+	deliveryModeHeader  = "X-Seamless-Auth-Delivery-Mode"
+	deliveryKindsHeader = "X-Seamless-Auth-Delivery-Kinds"
+	maxBodyBytes        = 1 << 20
 )
 
 // Adapter serves the Seamless Auth routes. Mount Handler under a prefix, usually
@@ -42,7 +44,7 @@ func New(opts Options) (*Adapter, error) {
 	}
 	return &Adapter{
 		opts:      resolved,
-		jwks:      newJWKSCache(resolved.AuthServerURL, resolved.HTTPClient),
+		jwks:      newJWKSCache(resolved.AuthServerURL, resolved.HTTPClient, resolved.Logf),
 		manifest:  newManifestSource(resolved.AuthServerURL, resolved.HTTPClient, !resolved.DisableManifestFetch, resolved.Logf),
 		tokens:    &serviceTokens{secret: resolved.ServiceSecret, kid: resolved.JWKSKid},
 		refreshes: newRefresher(),
@@ -195,6 +197,16 @@ func (a *Adapter) call(ctx context.Context, r *http.Request, c upstreamCall) (*h
 	}
 
 	return a.opts.HTTPClient.Do(req)
+}
+
+// upstreamError drops the URL a client error carries: its path or query can
+// hold a magic link token or an OAuth code.
+func upstreamError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
+	}
+	return err
 }
 
 // readJSON reads a response body. An empty body is nil; a body that is not JSON

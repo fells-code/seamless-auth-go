@@ -2,6 +2,7 @@ package seamlessauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -136,9 +137,9 @@ func carriesSession(body any) (map[string]any, bool) {
 	return obj, stringClaim(obj, "token") != "" && stringClaim(obj, "sub") != ""
 }
 
-// cookieTransportBody is what a browser sees: a pick, or everything but tokens.
-// The cookies carry every token, including the ephemeral one the auth API
-// re-mints on an OTP send.
+// cookieTransportBody is what a browser sees: a pick, or the whole body, never
+// with tokens. The cookies carry every token, including the ephemeral one the
+// auth API re-mints on an OTP send.
 func cookieTransportBody(route ManifestRoute, body any) any {
 	obj, ok := body.(map[string]any)
 	if !ok {
@@ -152,13 +153,13 @@ func cookieTransportBody(route ManifestRoute, body any) any {
 				out[key] = v
 			}
 		}
-		return out
-	}
-	for k, v := range obj {
-		if k != "token" && k != "refreshToken" {
+	} else {
+		for k, v := range obj {
 			out[k] = v
 		}
 	}
+	delete(out, "token")
+	delete(out, "refreshToken")
 	return out
 }
 
@@ -193,7 +194,10 @@ func (a *Adapter) manifestRoute(r *http.Request, match routeMatch, bearer bool) 
 		}
 	}
 
-	external := route.Delivery && a.opts.Deliver != nil
+	// A route that can hand back account notices is left to the auth API unless
+	// Deliver sends them too: the API takes a notice it hands back as delivered.
+	ownsDelivery := a.opts.Deliver != nil && (!route.Notices || a.opts.DeliverAccountNotices)
+	external := (route.Delivery || route.Notices) && ownsDelivery
 	call := upstreamCall{
 		method:        route.Method,
 		path:          route.upstreamPath(match.params),
@@ -205,11 +209,14 @@ func (a *Adapter) manifestRoute(r *http.Request, match routeMatch, bearer bool) 
 	if external {
 		call.service = a.tokens.deliveryAuthorization()
 		call.headers = map[string]string{deliveryModeHeader: "external"}
+		if route.Notices {
+			call.headers[deliveryKindsHeader] = DeliveryAccountNoticeEmail + "," + DeliveryAccountNoticeSMS
+		}
 	}
 
 	res, err := a.call(r.Context(), r, call)
 	if err != nil {
-		a.opts.Logf("[seamless-auth] %s %s: %v", route.Method, route.Path, err)
+		a.opts.Logf("[seamless-auth] %s %s: %v", route.Method, route.Path, upstreamError(err))
 		out := errorResult(http.StatusBadGateway, "upstream_unavailable")
 		out.set = cred.set
 		return out
@@ -226,19 +233,31 @@ func (a *Adapter) manifestRoute(r *http.Request, match routeMatch, bearer bool) 
 		return out
 	}
 
-	if external {
-		if obj, ok := data.(map[string]any); ok && obj["delivery"] != nil {
-			delivery, err := parseDelivery(obj["delivery"])
-			if err == nil {
-				err = a.opts.Deliver(r.Context(), delivery)
-			}
-			if err != nil {
-				a.opts.Logf("[seamless-auth] Delivery for %s %s failed: %v", route.Method, route.Path, err)
+	// A message is the application's to send, and holds a one-time credential, so
+	// it never goes back to the caller in either transport.
+	if obj, ok := data.(map[string]any); ok && (route.Delivery || route.Notices) {
+		single := obj["delivery"]
+		notices, _ := obj["deliveries"].([]any)
+		delete(obj, "delivery")
+		delete(obj, "deliveries")
+
+		if external && single != nil {
+			if _, err := a.deliverAll(r.Context(), route, []any{single}); err != nil {
 				out := errorResult(http.StatusBadGateway, "delivery_failed")
 				out.set = cred.set
 				return out
 			}
-			delete(obj, "delivery")
+		}
+		// The auth API opened the request and counted the owner as told when it
+		// handed the notices back. If none reached the owner, the request must not
+		// stay open behind their back.
+		if external && route.Notices && len(notices) > 0 {
+			if delivered, _ := a.deliverAll(r.Context(), route, notices); delivered == 0 {
+				a.cancelRecovery(r, notices)
+				out := errorResult(http.StatusServiceUnavailable, "recovery_notice_failed")
+				out.set = cred.set
+				return out
+			}
 		}
 	}
 
@@ -265,10 +284,115 @@ func (a *Adapter) manifestRoute(r *http.Request, match routeMatch, bearer bool) 
 		}
 	}
 
+	if !bearer && enrollmentRoutes[route.Method+" "+route.Path] && isRecoveryToken(cred.authorization) {
+		cookies, err := a.refreshAfterEnrollment(r, cred)
+		if err != nil {
+			a.opts.Logf("[seamless-auth] Could not refresh a recovery session after enrollment: %v", err)
+		} else {
+			out.set = cookies
+		}
+	}
+
 	if !bearer {
 		out.body = cookieTransportBody(route, data)
 	}
 	return out
+}
+
+// deliverAll hands every message to Deliver, even after one fails, so that as
+// many notices as possible reach the owner, and reports how many were sent. A
+// kind this adapter does not send is logged and skipped.
+func (a *Adapter) deliverAll(ctx context.Context, route ManifestRoute, messages []any) (int, error) {
+	var failed error
+	delivered := 0
+	for _, raw := range messages {
+		d, err := parseDelivery(raw)
+		if err == nil && !a.sends(d.Kind) {
+			a.opts.Logf("[seamless-auth] Unsupported delivery kind %q from %s %s, so no message was sent.", d.Kind, route.Method, route.Path)
+			continue
+		}
+		if err == nil {
+			err = a.opts.Deliver(ctx, d)
+		}
+		if err != nil {
+			a.opts.Logf("[seamless-auth] Delivery for %s %s failed: %v", route.Method, route.Path, err)
+			if failed == nil {
+				failed = err
+			}
+			continue
+		}
+		delivered++
+	}
+	return delivered, failed
+}
+
+// cancelRecovery voids the recovery request the notices are about, with the
+// cancel token in the fragment of their cancel link. Neither is ever logged.
+func (a *Adapter) cancelRecovery(r *http.Request, notices []any) {
+	var token string
+	for _, raw := range notices {
+		obj, _ := raw.(map[string]any)
+		if _, fragment, ok := strings.Cut(stringClaim(obj, "cancelUrl"), "#"); ok && fragment != "" {
+			token = fragment
+			break
+		}
+	}
+	if token == "" {
+		a.opts.Logf("[seamless-auth] No account notice was delivered and none carried a cancel link, so the recovery request stays open.")
+		return
+	}
+
+	body, err := json.Marshal(map[string]string{"cancelToken": token})
+	if err != nil {
+		return
+	}
+	res, err := a.call(r.Context(), r, upstreamCall{
+		method:  http.MethodPost,
+		path:    "/recovery/cancel",
+		body:    body,
+		service: a.tokens.proxyAuthorization(),
+	})
+	if err != nil {
+		a.opts.Logf("[seamless-auth] Could not cancel a recovery request no notice reached: %v", upstreamError(err))
+		return
+	}
+	res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		a.opts.Logf("[seamless-auth] Cancelling a recovery request no notice reached answered %d.", res.StatusCode)
+	}
+}
+
+func (a *Adapter) sends(kind string) bool {
+	if kind == DeliveryAccountNoticeEmail || kind == DeliveryAccountNoticeSMS {
+		return a.opts.DeliverAccountNotices
+	}
+	return knownDeliveryKinds[kind]
+}
+
+// Enrolling a passkey or authenticator app lifts a recovery session's
+// restriction, but the access token keeps its recovery claim until it is
+// refreshed.
+var enrollmentRoutes = set("POST /webauthn/register/finish", "POST /totp/enroll/verify")
+
+// isRecoveryToken reads the recovery claim of a token the adapter already
+// verified, before signing it into a cookie or on a refresh.
+func isRecoveryToken(authorization string) bool {
+	parsed, err := parseJWT(strings.TrimPrefix(authorization, "Bearer "))
+	return err == nil && parsed.claims["recovery"] == true
+}
+
+// refreshAfterEnrollment rotates the session the request ended on: the refresh
+// token a silent refresh just issued, or else the refresh cookie.
+func (a *Adapter) refreshAfterEnrollment(r *http.Request, cred credential) ([]cookieWrite, error) {
+	for _, c := range cred.set {
+		if c.name == a.opts.RefreshCookieName {
+			sub, token := stringClaim(c.value, "sub"), stringClaim(c.value, "refreshToken")
+			_, cookies, err := a.refreshSession(r, "token:"+token, func() (string, string) { return sub, token })
+			return cookies, err
+		}
+	}
+	_, cookies, err := a.silentRefresh(r)
+	return cookies, err
 }
 
 func (a *Adapter) issuedCookies(issues string, session map[string]any, sessionID string) ([]cookieWrite, error) {

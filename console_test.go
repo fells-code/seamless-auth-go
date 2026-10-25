@@ -141,3 +141,26 @@ func TestTheConsoleReportsAnUnreachableUpstream(t *testing.T) {
 		t.Fatalf("status %d %q", rec.Code, rec.Body.String())
 	}
 }
+
+func TestTheConsoleKeepsTheAPIsFramingHeaders(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("GET", "/console/index.html", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = w.Write([]byte("<html></html>"))
+	})
+
+	rec := console(t, newTestAdapter(t, api), "GET", "/console/index.html")
+
+	for name, want := range map[string]string{
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"X-Content-Type-Options":  "nosniff",
+	} {
+		if got := rec.Header().Get(name); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+}

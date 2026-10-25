@@ -2,6 +2,7 @@ package seamlessauth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -91,24 +92,29 @@ func cookieKind(held string) string {
 	}
 }
 
+// Browsers cap a cookie's lifetime at 400 days (RFC 6265bis).
+const maxCookieAge = 400 * 24 * 60 * 60
+
 // ttlSeconds reads a lifetime the auth API sent, which may be a number or a
 // numeric string. Anything that is not a positive whole number of seconds is
 // refused: a cookie is the session, and one with a lifetime nobody can vouch for
-// is worse than refusing the response.
+// is worse than refusing the response. A longer lifetime is capped at what
+// browsers keep.
 func ttlSeconds(v any) (int, error) {
+	var n int64
+	var err error
 	switch t := v.(type) {
 	case json.Number:
-		n, err := t.Int64()
-		if err == nil && n > 0 {
-			return int(n), nil
-		}
+		n, err = t.Int64()
 	case string:
-		n, err := strconv.Atoi(t)
-		if err == nil && n > 0 {
-			return n, nil
-		}
+		n, err = strconv.ParseInt(t, 10, 64)
+	default:
+		err = errors.New("not a number")
 	}
-	return 0, fmt.Errorf("unusable cookie ttl %v", v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("unusable cookie ttl %v", v)
+	}
+	return int(min(n, maxCookieAge)), nil
 }
 
 // sessionCookies builds the cookies for a verified session response: access, and
