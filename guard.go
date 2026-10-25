@@ -14,6 +14,9 @@ type User struct {
 	Phone string
 	// Token is the auth API access token, for calling the API on the user's behalf.
 	Token string
+	// Recovery is a session a recovery code issued, before the user enrolled a
+	// new passkey or authenticator app. Only with AllowRecoverySessions.
+	Recovery bool
 }
 
 type userKey struct{}
@@ -26,11 +29,16 @@ func UserFromContext(ctx context.Context) (*User, bool) {
 
 var errUnauthenticated = errors.New("unauthenticated")
 
+// ErrEnrollmentRequired is a valid session from a recovery code, refused until
+// the user enrolls a new passkey or authenticator app (see AllowRecoverySessions).
+var ErrEnrollmentRequired = errors.New("enrollment required")
+
 // Authenticate verifies the request's session: the adapter's access cookie, or an
 // auth API access token in Authorization: Bearer for clients with no cookie jar.
 // The cookie wins when present. It reads the Cookie header itself, so it works on
 // any route. It does not refresh: silent refresh belongs to the auth routes, and a
-// bearer client refreshes through POST /refresh itself.
+// bearer client refreshes through POST /refresh itself. A recovery session is
+// ErrEnrollmentRequired unless AllowRecoverySessions is set.
 func (a *Adapter) Authenticate(r *http.Request) (*User, error) {
 	user, _, err := a.authenticate(r)
 	return user, err
@@ -39,13 +47,24 @@ func (a *Adapter) Authenticate(r *http.Request) (*User, error) {
 // authenticate is Authenticate, also reporting whether the session came from the
 // cookie, which a browser attaches on its own.
 func (a *Adapter) authenticate(r *http.Request) (*User, bool, error) {
+	user, byCookie, err := a.session(r)
+	if err == nil && user.Recovery && !a.opts.AllowRecoverySessions {
+		return nil, byCookie, ErrEnrollmentRequired
+	}
+	return user, byCookie, err
+}
+
+func (a *Adapter) session(r *http.Request) (*User, bool, error) {
 	if c, err := r.Cookie(a.opts.AccessCookieName); err == nil && c.Value != "" {
 		claims, ok := a.readCookie(r, a.opts.AccessCookieName, kindAccess)
 		token := stringClaim(claims, "token")
-		if !ok || stringClaim(claims, "sub") == "" || !isAccessToken(token) {
+		inner, isAccess := accessTokenClaims(token)
+		if !ok || stringClaim(claims, "sub") == "" || !isAccess {
 			return nil, true, errUnauthenticated
 		}
-		return userFrom(claims, token), true, nil
+		user := userFrom(claims, token)
+		user.Recovery = inner["recovery"] == true
+		return user, true, nil
 	}
 
 	token := bearerToken(r)
@@ -58,15 +77,20 @@ func (a *Adapter) authenticate(r *http.Request) (*User, bool, error) {
 	if err != nil || stringClaim(claims, "typ") != "access" || stringClaim(claims, "sub") == "" {
 		return nil, false, errUnauthenticated
 	}
-	return userFrom(claims, token), false, nil
+	user := userFrom(claims, token)
+	user.Recovery = claims["recovery"] == true
+	return user, false, nil
 }
 
-// isAccessToken reads the type of the auth API token inside a session cookie. It
-// was verified against the API's key set before the adapter signed it into the
-// cookie, so its claims are read without verifying it again.
-func isAccessToken(token string) bool {
+// accessTokenClaims reads the auth API token inside a session cookie, if it is
+// an access token. It was verified against the API's key set before the adapter
+// signed it into the cookie, so its claims are read without verifying it again.
+func accessTokenClaims(token string) (map[string]any, bool) {
 	parsed, err := parseJWT(token)
-	return err == nil && stringClaim(parsed.claims, "typ") == "access"
+	if err != nil || stringClaim(parsed.claims, "typ") != "access" {
+		return nil, false
+	}
+	return parsed.claims, true
 }
 
 func userFrom(claims map[string]any, token string) *User {
@@ -88,10 +112,15 @@ func userFrom(claims map[string]any, token string) *User {
 
 // RequireAuth answers 401 unless the request carries a valid session, and puts
 // the user on the request context for next. A cookie session is refused with 403
-// for a cross-site state change, as on the auth routes.
+// for a cross-site state change, as on the auth routes, and a recovery session
+// with 403 enrollment_required unless AllowRecoverySessions is set.
 func (a *Adapter) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, byCookie, err := a.authenticate(r)
+		if errors.Is(err, ErrEnrollmentRequired) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "enrollment_required"})
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthenticated"})
 			return

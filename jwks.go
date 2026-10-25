@@ -6,42 +6,67 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"sync"
 	"time"
 )
 
-// A kid the cached key set does not know triggers at most one refetch per this
-// interval, so a stream of forged kids cannot turn into a stream of fetches.
-const jwksRefetchInterval = 30 * time.Second
+const (
+	// A kid the cached key set does not know triggers at most one refetch per this
+	// interval, so a stream of forged kids cannot turn into a stream of fetches.
+	jwksRefetchInterval = 30 * time.Second
+	// A key set older than this is fetched again, so a key the API retires stops
+	// verifying.
+	jwksMaxAge = 10 * time.Minute
+	// With no key set at all, how long a failed fetch holds off the next.
+	jwksFailureBackoff = 5 * time.Second
+	jwksFetchTimeout   = 5 * time.Second
+	maxJWKSBytes       = 256 << 10
+)
 
 type jwksCache struct {
 	url    string
 	client *http.Client
+	logf   func(string, ...any)
 
-	mu        sync.Mutex
-	keys      map[string]*rsa.PublicKey
-	fetchedAt time.Time
+	mu          sync.Mutex
+	keys        map[string]*rsa.PublicKey
+	fetchedAt   time.Time
+	attemptedAt time.Time
 }
 
-func newJWKSCache(authServerURL string, client *http.Client) *jwksCache {
-	return &jwksCache{url: authServerURL + "/.well-known/jwks.json", client: client}
+func newJWKSCache(authServerURL string, client *http.Client, logf func(string, ...any)) *jwksCache {
+	return &jwksCache{url: authServerURL + "/.well-known/jwks.json", client: client, logf: logf}
 }
 
 func (c *jwksCache) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if key, ok := c.keys[kid]; ok {
+	now := time.Now()
+	fresh := !c.fetchedAt.IsZero() && now.Sub(c.fetchedAt) < jwksMaxAge
+	if key, ok := c.keys[kid]; ok && fresh {
 		return key, nil
 	}
-	if c.keys != nil && time.Since(c.fetchedAt) < jwksRefetchInterval {
-		return nil, fmt.Errorf("unknown key id %q", kid)
+
+	backoff := jwksFailureBackoff
+	if c.keys != nil {
+		backoff = jwksRefetchInterval
 	}
-	if err := c.fetch(ctx); err != nil {
-		return nil, err
+	if c.attemptedAt.IsZero() || now.Sub(c.attemptedAt) >= backoff {
+		c.attemptedAt = now
+		if err := c.fetch(ctx); err != nil {
+			if c.keys == nil {
+				return nil, err
+			}
+			// A stale key set keeps verifying while the API cannot be reached,
+			// rather than signing every user out.
+			c.logf("[seamless-auth] Could not refresh the JWKS (%v).", err)
+		}
 	}
+
 	if key, ok := c.keys[kid]; ok {
 		return key, nil
 	}
@@ -56,7 +81,7 @@ type jwk struct {
 }
 
 func (c *jwksCache) fetch(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
@@ -65,17 +90,27 @@ func (c *jwksCache) fetch(ctx context.Context) error {
 	}
 	res, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("jwks: %w", upstreamError(err))
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("jwks: HTTP %d", res.StatusCode)
 	}
+	if res.ContentLength > maxJWKSBytes {
+		return errors.New("jwks: response too large")
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, maxJWKSBytes+1))
+	if err != nil {
+		return fmt.Errorf("jwks: %w", upstreamError(err))
+	}
+	if len(data) > maxJWKSBytes {
+		return errors.New("jwks: response too large")
+	}
 
 	var set struct {
 		Keys []jwk `json:"keys"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&set); err != nil {
+	if err := json.Unmarshal(data, &set); err != nil {
 		return err
 	}
 

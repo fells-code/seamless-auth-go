@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -37,6 +38,9 @@ type ManifestRoute struct {
 		Pick []string `json:"pick"`
 	} `json:"body,omitempty"`
 	Delivery bool `json:"delivery,omitempty"`
+	// Notices marks a route whose response can carry account notices for the
+	// owner, as a deliveries array, when the caller owns delivery.
+	Notices bool `json:"notices,omitempty"`
 }
 
 var (
@@ -229,7 +233,7 @@ func (s *manifestSource) load(ctx context.Context) (*Manifest, error) {
 
 	res, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, upstreamError(err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
@@ -237,7 +241,7 @@ func (s *manifestSource) load(ctx context.Context) (*Manifest, error) {
 	}
 
 	var raw json.RawMessage
-	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxBodyBytes)).Decode(&raw); err != nil {
 		return nil, err
 	}
 	return ParseManifest(raw)

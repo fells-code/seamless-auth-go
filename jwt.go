@@ -125,7 +125,11 @@ func verifyRS256(parsed *parsedJWT, key *rsa.PublicKey) error {
 const clockSkew = 5 * time.Second
 
 func checkTimes(claims map[string]any, now time.Time) error {
-	if exp, ok := numericClaim(claims, "exp"); ok && now.After(time.Unix(exp, 0).Add(clockSkew)) {
+	exp, ok := numericClaim(claims, "exp")
+	if !ok {
+		return errors.New("token has no exp")
+	}
+	if now.After(time.Unix(exp, 0).Add(clockSkew)) {
 		return errors.New("token expired")
 	}
 	if nbf, ok := numericClaim(claims, "nbf"); ok && now.Add(clockSkew).Before(time.Unix(nbf, 0)) {
