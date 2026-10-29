@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.0](https://github.com/fells-code/seamless-auth-go/compare/v0.2.1...v0.3.0) (2026-10-25)
+
+
+### Added
+
+* recovery sessions and account notice delivery, with parity hardening ([6e8750f](https://github.com/fells-code/seamless-auth-go/commit/6e8750f615d1b80c77580cb0bded41b4f7fca6b7))
+* recovery sessions and account notice delivery, with parity hardening ([09acec5](https://github.com/fells-code/seamless-auth-go/commit/09acec5417994b0af54cb6626b189b5640a6ce02)), closes [#11](https://github.com/fells-code/seamless-auth-go/issues/11)
+
+
+### Fixed
+
+* cap cookie lifetimes at 400 days and require an http or https AuthServerURL ([09acec5](https://github.com/fells-code/seamless-auth-go/commit/09acec5417994b0af54cb6626b189b5640a6ce02))
+* **console:** keep the API's framing and content-type headers ([94f9af8](https://github.com/fells-code/seamless-auth-go/commit/94f9af8c0cf6a340856690bd54d8242f20130439)), closes [#10](https://github.com/fells-code/seamless-auth-go/issues/10)
+* expire the JWKS cache, back off failed fetches and cap the key set size ([09acec5](https://github.com/fells-code/seamless-auth-go/commit/09acec5417994b0af54cb6626b189b5640a6ce02))
+* refuse placeholder cookie and service secrets outside insecure local mode ([09acec5](https://github.com/fells-code/seamless-auth-go/commit/09acec5417994b0af54cb6626b189b5640a6ce02))
+* refuse upstream redirects and keep upstream URLs out of logs ([09acec5](https://github.com/fells-code/seamless-auth-go/commit/09acec5417994b0af54cb6626b189b5640a6ce02))
+* require exp, clear cookies on a rejected logout and never pick tokens into a body ([09acec5](https://github.com/fells-code/seamless-auth-go/commit/09acec5417994b0af54cb6626b189b5640a6ce02))
+
+
+### Documentation
+
+* link the governance document and license pledge ([fa4a70f](https://github.com/fells-code/seamless-auth-go/commit/fa4a70f65e8d7d4bc7473787923dfcd102ffba11))
+* link the governance document and license pledge ([73f03a1](https://github.com/fells-code/seamless-auth-go/commit/73f03a13498cd409f0c7e04be072461e5466f8dc))
+
 ## [0.2.1](https://github.com/fells-code/seamless-auth-go/compare/v0.2.0...v0.2.1) (2026-10-18)
 
 
