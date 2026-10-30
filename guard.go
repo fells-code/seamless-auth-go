@@ -36,9 +36,10 @@ var ErrEnrollmentRequired = errors.New("enrollment required")
 // Authenticate verifies the request's session: the adapter's access cookie, or an
 // auth API access token in Authorization: Bearer for clients with no cookie jar.
 // The cookie wins when present. It reads the Cookie header itself, so it works on
-// any route. It does not refresh: silent refresh belongs to the auth routes, and a
-// bearer client refreshes through POST /refresh itself. A recovery session is
-// ErrEnrollmentRequired unless AllowRecoverySessions is set.
+// any route. A cookie's inner access token is verified as a bearer token is, and
+// the session's roles come from it. It does not refresh: silent refresh belongs
+// to the auth routes, and a bearer client refreshes through POST /refresh itself.
+// A recovery session is ErrEnrollmentRequired unless AllowRecoverySessions is set.
 func (a *Adapter) Authenticate(r *http.Request) (*User, error) {
 	user, _, err := a.authenticate(r)
 	return user, err
@@ -57,12 +58,19 @@ func (a *Adapter) authenticate(r *http.Request) (*User, bool, error) {
 func (a *Adapter) session(r *http.Request) (*User, bool, error) {
 	if c, err := r.Cookie(a.opts.AccessCookieName); err == nil && c.Value != "" {
 		claims, ok := a.readCookie(r, a.opts.AccessCookieName, kindAccess)
+		sub := stringClaim(claims, "sub")
+		if !ok || sub == "" {
+			return nil, true, errUnauthenticated
+		}
+		// The cookie secret alone can sign a cookie, so the token inside it is held
+		// to the auth API's key set, and the session's roles come from that token.
 		token := stringClaim(claims, "token")
-		inner, isAccess := accessTokenClaims(token)
-		if !ok || stringClaim(claims, "sub") == "" || !isAccess {
+		inner, err := a.verifyAccessToken(r.Context(), token)
+		if err != nil || stringClaim(inner, "sub") != sub {
 			return nil, true, errUnauthenticated
 		}
 		user := userFrom(claims, token)
+		user.Roles = rolesFrom(inner)
 		user.Recovery = inner["recovery"] == true
 		return user, true, nil
 	}
@@ -71,10 +79,8 @@ func (a *Adapter) session(r *http.Request) (*User, bool, error) {
 	if token == "" {
 		return nil, false, errUnauthenticated
 	}
-	claims, err := a.jwks.verifyAuthToken(r.Context(), token, a.opts.AuthServerIssuer, a.opts.Audience)
-	// An ephemeral sign-in token is signed by the same key, so the type is what
-	// keeps it from passing for a session.
-	if err != nil || stringClaim(claims, "typ") != "access" || stringClaim(claims, "sub") == "" {
+	claims, err := a.verifyAccessToken(r.Context(), token)
+	if err != nil {
 		return nil, false, errUnauthenticated
 	}
 	user := userFrom(claims, token)
@@ -82,15 +88,18 @@ func (a *Adapter) session(r *http.Request) (*User, bool, error) {
 	return user, false, nil
 }
 
-// accessTokenClaims reads the auth API token inside a session cookie, if it is
-// an access token. It was verified against the API's key set before the adapter
-// signed it into the cookie, so its claims are read without verifying it again.
-func accessTokenClaims(token string) (map[string]any, bool) {
-	parsed, err := parseJWT(token)
-	if err != nil || stringClaim(parsed.claims, "typ") != "access" {
-		return nil, false
+// verifyAccessToken checks an auth API access token against the API's key set.
+// An ephemeral sign-in token is signed by the same key, so the type is what
+// keeps it from passing for a session.
+func (a *Adapter) verifyAccessToken(ctx context.Context, token string) (map[string]any, error) {
+	if token == "" {
+		return nil, errUnauthenticated
 	}
-	return parsed.claims, true
+	claims, err := a.jwks.verifyAuthToken(ctx, token, a.opts.AuthServerIssuer, a.opts.Audience)
+	if err != nil || stringClaim(claims, "typ") != "access" || stringClaim(claims, "sub") == "" {
+		return nil, errUnauthenticated
+	}
+	return claims, nil
 }
 
 func userFrom(claims map[string]any, token string) *User {
@@ -100,14 +109,20 @@ func userFrom(claims map[string]any, token string) *User {
 		Phone: stringClaim(claims, "phone"),
 		Token: token,
 	}
+	user.Roles = rolesFrom(claims)
+	return user
+}
+
+func rolesFrom(claims map[string]any) []string {
+	var out []string
 	if roles, ok := claims["roles"].([]any); ok {
 		for _, role := range roles {
 			if s, ok := role.(string); ok {
-				user.Roles = append(user.Roles, s)
+				out = append(out, s)
 			}
 		}
 	}
-	return user
+	return out
 }
 
 // RequireAuth answers 401 unless the request carries a valid session, and puts
