@@ -142,6 +142,10 @@ func (c *jwksCache) fetch(ctx context.Context) error {
 // verifyAuthToken checks a token the auth API signed: RS256 under a key it
 // publishes, issued by issuer for audience, and in date.
 func (c *jwksCache) verifyAuthToken(ctx context.Context, token, issuer, audience string) (map[string]any, error) {
+	// An empty expectation would match a token that omits the claim.
+	if issuer == "" || audience == "" {
+		return nil, errors.New("no expected issuer or audience")
+	}
 	parsed, err := parseJWT(token)
 	if err != nil {
 		return nil, err

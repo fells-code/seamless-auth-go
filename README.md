@@ -89,6 +89,13 @@ both are present. It reads the `Cookie` header itself, so it works on any route.
 refresh: the auth routes refresh a browser session silently, and a bearer client calls
 `POST /auth/refresh` itself. `Authenticate` does the same check without answering.
 
+A session cookie is signed with `CookieSecret`, but the auth API access token inside it is
+verified too, the same way as a bearer token: RS256 against the API's JWKS, with the expected
+issuer and audience, in date, of type `access`, and for the cookie's subject. `User.Roles` (and
+`User.Recovery`) come from that verified token, not from the cookie, so a cookie signed with a
+leaked `CookieSecret` cannot grant itself roles. If the JWKS cannot be fetched and no key set is
+cached, the session is refused with 401.
+
 ### Recovery sessions
 
 Redeeming an account recovery code issues a recovery session: its access token carries
@@ -104,10 +111,13 @@ new access cookie no longer carries it. A bearer client holds its own refresh to
 `POST /auth/refresh` after enrolling.
 
 A request `RequireAuth` admits on the session cookie also gets the auth routes' cross-site
-check: while cookies are `SameSite=None`, a state-changing request from another site
-(`Sec-Fetch-Site: cross-site`, or an `Origin` outside `AllowedOrigins`) answers 403
-`cross_site_request_blocked`. A bearer token is never attached by a browser, so it is not
-checked. `Authenticate` makes no such check.
+check: while cookies are `SameSite=None`, a state-changing request from another site answers
+403 `cross_site_request_blocked`. That is `Sec-Fetch-Site: cross-site`; or, with
+`AllowedOrigins` set, `Sec-Fetch-Site: same-site` (which also covers a sibling subdomain) from an
+`Origin` that is missing or not on the list; or, from a browser that sends no `Sec-Fetch-Site`,
+an `Origin` outside `AllowedOrigins`. Without `AllowedOrigins`, a same-site request passes. A
+bearer token is never attached by a browser, so it is not checked. `Authenticate` makes no such
+check.
 
 ### Request bodies
 
@@ -129,7 +139,7 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `CookieDomain` | none | Cookie `Domain` |
 | `InsecureCookies` | `false` | Drops `Secure`, for local development over HTTP. Also lets placeholder secrets through, with a warning |
 | `CookieSameSite` | `None`, or `Lax` with `InsecureCookies` | Cookie `SameSite` |
-| `AllowedOrigins` | none | The only cross-origin callers allowed to change state while cookies are `SameSite=None` |
+| `AllowedOrigins` | none | The only cross-origin and same-site callers allowed to change state while cookies are `SameSite=None` |
 | `AccessCookieName`, `RefreshCookieName` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `RegistrationCookieName`, `PreAuthCookieName` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `Deliver` | none | Sends OTP codes and magic links through your own transports |

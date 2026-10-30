@@ -40,7 +40,8 @@ type Options struct {
 	// CookieSameSite defaults to None for secure cookies and Lax otherwise.
 	CookieSameSite http.SameSite
 	// AllowedOrigins, when set, is the only cross-origin callers allowed to make
-	// state-changing requests while cookies are SameSite=None.
+	// state-changing requests while cookies are SameSite=None. A request marked
+	// Sec-Fetch-Site: same-site must then carry an Origin on the list as well.
 	AllowedOrigins []string
 
 	AccessCookieName       string
