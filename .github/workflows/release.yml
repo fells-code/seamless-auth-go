@@ -25,6 +25,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.repository == 'fells-code/seamless-auth-go'
     permissions:
       contents: write
