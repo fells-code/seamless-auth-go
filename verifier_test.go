@@ -278,6 +278,8 @@ func TestNewVerifierRefusesBadConfig(t *testing.T) {
 		"fractional max age": {MaxAge: durationPtr(1500 * time.Millisecond)},
 		"quoted acr":         {ACRValues: []string{`a"b`}},
 		"empty amr":          {AMR: []string{""}},
+		"empty acr list":     {ACRValues: []string{}, MaxAge: durationPtr(time.Minute)},
+		"empty amr list":     {AMR: []string{}, MaxAge: durationPtr(time.Minute)},
 	} {
 		if _, err := v.RequireStepUp(step); err == nil {
 			t.Errorf("RequireStepUp %s: accepted", name)
@@ -287,6 +289,9 @@ func TestNewVerifierRefusesBadConfig(t *testing.T) {
 		"no scope":     func() { v.RequireScope() },
 		"spaced scope": func() { v.RequireScope("a b") },
 		"no role":      func() { v.RequireRole() },
+		"empty scope":  func() { v.RequireScope("a", "") },
+		"empty role":   func() { v.RequireRole("") },
+		"blank role":   func() { v.RequireRole(" ") },
 	} {
 		func() {
 			defer func() {
@@ -383,11 +388,29 @@ func (p *fakeProvider) token(t *testing.T) string {
 
 func (p *fakeProvider) tokenWithHeader(t *testing.T, h map[string]string) string {
 	t.Helper()
+	return p.sign(t, h, nil, "")
+}
+
+// sign issues a token whose claims are the defaults with overrides applied (a
+// nil value is kept as null), and whose payload has rawExp spliced in as exp when
+// set, for literals encoding/json cannot write.
+func (p *fakeProvider) sign(t *testing.T, h map[string]string, overrides map[string]any, rawExp string) string {
+	t.Helper()
 	header, _ := json.Marshal(h)
-	payload, _ := json.Marshal(map[string]any{
+	claims := map[string]any{
 		"iss": p.server.URL, "aud": "https://api.example.test", "sub": "u1", "client_id": "app",
 		"exp": time.Now().Add(time.Minute).Unix(), "scope": "a b",
-	})
+	}
+	for k, v := range overrides {
+		claims[k] = v
+	}
+	if rawExp != "" {
+		claims["exp"] = "RAW_EXP"
+	}
+	payload, _ := json.Marshal(claims)
+	if rawExp != "" {
+		payload = []byte(strings.Replace(string(payload), `"RAW_EXP"`, rawExp, 1))
+	}
 	input := b64.EncodeToString(header) + "." + b64.EncodeToString(payload)
 	digest := sha256.Sum256([]byte(input))
 	sig, err := rsa.SignPKCS1v15(rand.Reader, rsaKey(t), crypto.SHA256, digest[:])
@@ -416,6 +439,46 @@ func TestVerifierDiscoversTheKeySetOnce(t *testing.T) {
 	}
 	if p.discoveries.Load() != 1 || p.jwksFetches.Load() != 1 {
 		t.Fatalf("%d discoveries, %d key set fetches", p.discoveries.Load(), p.jwksFetches.Load())
+	}
+}
+
+func TestVerifierClaimTypes(t *testing.T) {
+	p := newFakeProvider(t, false)
+	v := p.verifier(t)
+	header := map[string]string{"alg": "RS256", "kid": "k1", "typ": "at+jwt"}
+	refused := map[string]map[string]any{}
+	for _, claim := range []string{"iss", "aud", "exp", "nbf", "sub", "client_id", "scope", "acr", "amr", "auth_time", "roles", "sid", "typ"} {
+		refused[claim+" null"] = map[string]any{claim: nil}
+	}
+	refused["exp bool"] = map[string]any{"exp": true}
+	refused["nbf bool"] = map[string]any{"nbf": false}
+	refused["auth_time bool"] = map[string]any{"auth_time": true}
+	refused["org_id number"] = map[string]any{"org_id": 5}
+	refused["cnf without a hook"] = map[string]any{"cnf": map[string]any{"jkt": "x"}}
+	for name, overrides := range refused {
+		if rec := serveToken(v, p.sign(t, header, overrides, "")); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: %d", name, rec.Code)
+		}
+	}
+	for _, raw := range []string{"1e999", "-1e999"} {
+		if rec := serveToken(v, p.sign(t, header, nil, raw)); rec.Code != http.StatusUnauthorized {
+			t.Errorf("exp %s: %d", raw, rec.Code)
+		}
+	}
+	for name, overrides := range map[string]map[string]any{
+		"org_id null": {"org_id": nil},
+		"cnf null":    {"cnf": nil},
+		"iat string":  {"iat": "soon"},
+	} {
+		if rec := serveToken(v, p.sign(t, header, overrides, "")); rec.Code != http.StatusNoContent {
+			t.Errorf("%s: %d", name, rec.Code)
+		}
+	}
+}
+
+func TestVerifierAcceptsAnHTTPJWKSURIUnderAnHTTPSIssuer(t *testing.T) {
+	if _, err := NewVerifier(VerifierOptions{Issuer: "https://login.example", Audience: "a", JWKSURI: "http://keys.internal/jwks"}); err != nil {
+		t.Fatal(err)
 	}
 }
 

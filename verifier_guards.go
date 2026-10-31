@@ -41,10 +41,15 @@ func (v *Verifier) RequireScope(scopes ...string) func(http.Handler) http.Handle
 
 // RequireRole answers 403 insufficient_role unless the token's roles grant at
 // least one of roles, matched as RoleGrantsAccess does. Put it inside
-// RequireToken. It panics when given no role.
+// RequireToken. It panics when given no role, or an empty one.
 func (v *Verifier) RequireRole(roles ...string) func(http.Handler) http.Handler {
 	if len(roles) == 0 {
 		panic("seamlessauth: RequireRole needs at least one role")
+	}
+	for _, role := range roles {
+		if trimJS(role) == "" {
+			panic("seamlessauth: RequireRole was given an empty role")
+		}
 	}
 	return guard(func(w http.ResponseWriter, _ *http.Request, user *TokenUser) bool {
 		for _, required := range roles {
@@ -62,7 +67,8 @@ func (v *Verifier) RequireRole(roles ...string) func(http.Handler) http.Handler 
 // StepUp is what RequireStepUp asks of the user's authentication (RFC 9470).
 type StepUp struct {
 	// ACRValues accepts a token whose acr is one of them. Listing "phr" also
-	// accepts "phrh", which is stronger.
+	// accepts "phrh", which is stronger. Nil asks nothing of acr; an empty,
+	// non-nil list is an error, as it is for AMR.
 	ACRValues []string
 	// AMR requires every one of these methods in the token's amr.
 	AMR []string
@@ -73,12 +79,16 @@ type StepUp struct {
 
 // RequireStepUp answers 401 insufficient_user_authentication, with the RFC 9470
 // challenge, unless the token meets step. Put it inside RequireToken. It is an
-// error to ask for nothing, or for a negative or fractional MaxAge.
+// error to ask for nothing, to pass an empty list, or a negative or fractional
+// MaxAge.
 func (v *Verifier) RequireStepUp(step StepUp) (func(http.Handler) http.Handler, error) {
 	if len(step.ACRValues) == 0 && len(step.AMR) == 0 && step.MaxAge == nil {
 		return nil, errors.New("seamlessauth: RequireStepUp needs ACRValues, AMR or MaxAge")
 	}
 	for _, values := range [][]string{step.ACRValues, step.AMR} {
+		if values != nil && len(values) == 0 {
+			return nil, errors.New("seamlessauth: RequireStepUp was given an empty ACRValues or AMR list")
+		}
 		for _, value := range values {
 			if !isChallengeToken(value) {
 				return nil, fmt.Errorf("seamlessauth: %q is not a valid acr or amr value", value)
