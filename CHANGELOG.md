@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/fells-code/seamless-auth-go/compare/v0.3.0...v0.4.0) (2026-10-31)
+
+
+### Added
+
+* verify-only resource server mode with audience, scope, role and step-up guards ([70388a4](https://github.com/fells-code/seamless-auth-go/commit/70388a421973aa8a0effae464811e7ba8bc7d576))
+* verify-only resource server mode with audience, scope, role and step-up guards ([0361e0f](https://github.com/fells-code/seamless-auth-go/commit/0361e0fe7aeee8a4992cac19f98f07ca5914a61d))
+
+
+### Fixed
+
+* Origin allowlist with Sec-Fetch-Site, and verify the cookie's inner access token ([aa76464](https://github.com/fells-code/seamless-auth-go/commit/aa764641407980f2a83d872b30faa5361d7d086b))
+* Origin allowlist with Sec-Fetch-Site, and verify the cookie's inner access token ([16f71ef](https://github.com/fells-code/seamless-auth-go/commit/16f71ef1e676cec6cd067339a6f8c1db484e663f))
+* verify-only setup errors for empty guard values, and claim type tests ([a666daf](https://github.com/fells-code/seamless-auth-go/commit/a666dafa85c7d4622defb8843309233c4871fe47))
+
 ## [0.3.0](https://github.com/fells-code/seamless-auth-go/compare/v0.2.1...v0.3.0) (2026-10-25)
 
 
