@@ -32,16 +32,24 @@ type jwksCache struct {
 	logf   func(string, ...any)
 
 	mu          sync.Mutex
-	keys        map[string]*rsa.PublicKey
+	keys        map[string]publishedKey
 	fetchedAt   time.Time
 	attemptedAt time.Time
 }
 
-func newJWKSCache(authServerURL string, client *http.Client, logf func(string, ...any)) *jwksCache {
-	return &jwksCache{url: authServerURL + "/.well-known/jwks.json", client: client, logf: logf}
+// publishedKey is an RSA key from a key set, with the use and alg members it was
+// published with, raw so that a member of the wrong type stays visible.
+type publishedKey struct {
+	pub *rsa.PublicKey
+	use json.RawMessage
+	alg json.RawMessage
 }
 
-func (c *jwksCache) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
+func newJWKSCache(url string, client *http.Client, logf func(string, ...any)) *jwksCache {
+	return &jwksCache{url: url, client: client, logf: logf}
+}
+
+func (c *jwksCache) key(ctx context.Context, kid string) (publishedKey, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -59,7 +67,7 @@ func (c *jwksCache) key(ctx context.Context, kid string) (*rsa.PublicKey, error)
 		c.attemptedAt = now
 		if err := c.fetch(ctx); err != nil {
 			if c.keys == nil {
-				return nil, err
+				return publishedKey{}, err
 			}
 			// A stale key set keeps verifying while the API cannot be reached,
 			// rather than signing every user out.
@@ -70,14 +78,16 @@ func (c *jwksCache) key(ctx context.Context, kid string) (*rsa.PublicKey, error)
 	if key, ok := c.keys[kid]; ok {
 		return key, nil
 	}
-	return nil, fmt.Errorf("unknown key id %q", kid)
+	return publishedKey{}, fmt.Errorf("unknown key id %q", kid)
 }
 
 type jwk struct {
-	Kty string `json:"kty"`
-	Kid string `json:"kid"`
-	N   string `json:"n"`
-	E   string `json:"e"`
+	Kty string          `json:"kty"`
+	Kid string          `json:"kid"`
+	N   string          `json:"n"`
+	E   string          `json:"e"`
+	Use json.RawMessage `json:"use"`
+	Alg json.RawMessage `json:"alg"`
 }
 
 func (c *jwksCache) fetch(ctx context.Context) error {
@@ -114,7 +124,7 @@ func (c *jwksCache) fetch(ctx context.Context) error {
 		return err
 	}
 
-	keys := make(map[string]*rsa.PublicKey, len(set.Keys))
+	keys := make(map[string]publishedKey, len(set.Keys))
 	for _, k := range set.Keys {
 		if k.Kty != "RSA" {
 			continue
@@ -131,7 +141,11 @@ func (c *jwksCache) fetch(ctx context.Context) error {
 		for _, b := range e {
 			exponent = exponent<<8 | int(b)
 		}
-		keys[k.Kid] = &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: exponent}
+		keys[k.Kid] = publishedKey{
+			pub: &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: exponent},
+			use: k.Use,
+			alg: k.Alg,
+		}
 	}
 
 	c.keys = keys
@@ -154,7 +168,7 @@ func (c *jwksCache) verifyAuthToken(ctx context.Context, token, issuer, audience
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyRS256(parsed, key); err != nil {
+	if err := verifyRS256(parsed, key.pub); err != nil {
 		return nil, err
 	}
 	if stringClaim(parsed.claims, "iss") != issuer {
