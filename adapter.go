@@ -44,7 +44,7 @@ func New(opts Options) (*Adapter, error) {
 	}
 	return &Adapter{
 		opts:      resolved,
-		jwks:      newJWKSCache(resolved.AuthServerURL, resolved.HTTPClient, resolved.Logf),
+		jwks:      newJWKSCache(resolved.AuthServerURL+"/.well-known/jwks.json", resolved.HTTPClient, resolved.Logf),
 		manifest:  newManifestSource(resolved.AuthServerURL, resolved.HTTPClient, !resolved.DisableManifestFetch, resolved.Logf),
 		tokens:    &serviceTokens{secret: resolved.ServiceSecret, kid: resolved.JWKSKid},
 		refreshes: newRefresher(),

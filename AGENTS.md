@@ -68,6 +68,9 @@ The module targets Go 1.22. Do not use standard library APIs newer than that (CI
 - `console.go`: `ConsoleHandler`, the admin dashboard proxy.
 - `jwt.go`, `jwks.go`, `servicetoken.go`: HS256 cookies and service tokens, RS256 against the
   API's JWKS.
+- `verifier.go`, `verifier_guards.go`: `Verifier`, the verify-only mode for resource servers
+  behind the OpenID Provider, and its scope, role and step-up guards. Held to the shared vectors
+  in `testdata/verify_only_vectors.json`, copied from `fells-code/seamless-auth-server`.
 - `conformance/refapp`: the reference app for the conformance suite. A test fixture.
 
 ## Contract

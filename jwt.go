@@ -52,6 +52,7 @@ func signHS256(claims map[string]any, secret string, ttl time.Duration, kid stri
 
 type parsedJWT struct {
 	header       jwtHeader
+	rawHeader    []byte
 	claims       map[string]any
 	signingInput string
 	signature    []byte
@@ -85,6 +86,7 @@ func parseJWT(token string) (*parsedJWT, error) {
 	if err := decoder.Decode(&parsed.claims); err != nil {
 		return nil, err
 	}
+	parsed.rawHeader = rawHeader
 	parsed.signingInput = parts[0] + "." + parts[1]
 	parsed.signature = signature
 

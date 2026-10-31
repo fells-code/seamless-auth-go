@@ -126,6 +126,82 @@ The auth routes forward a request body to the auth API as JSON, so a body must b
 cross-site form can post a `text/plain` body shaped like JSON with no CORS preflight, and read as
 JSON it would be a sign-in the user never made. The client SDKs already send JSON.
 
+## Verify-only mode (resource servers)
+
+An API that sits behind the Seamless Auth OpenID Provider, and only receives its access tokens
+(RFC 9068 JWTs) as `Authorization: Bearer`, does not need the adapter. `NewVerifier` checks those
+tokens with nothing but the provider's issuer and this API's resource identifier: no cookie
+secret, no service secret, no auth routes.
+
+```go
+rs, err := seamlessauth.NewVerifier(seamlessauth.VerifierOptions{
+	Issuer:   "https://login.example.com",  // the provider's oidc_issuer
+	Audience: "https://orders.example.com", // this API's resource identifier
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+maxAge := 5 * time.Minute
+stepUp, err := rs.RequireStepUp(seamlessauth.StepUp{ACRValues: []string{"phr"}, MaxAge: &maxAge})
+if err != nil {
+	log.Fatal(err)
+}
+
+mux.Handle("GET /orders", rs.RequireToken(rs.RequireScope("orders:read")(http.HandlerFunc(list))))
+mux.Handle("POST /refunds", rs.RequireToken(stepUp(http.HandlerFunc(refund))))
+mux.Handle("GET /admin", rs.RequireToken(rs.RequireRole("orders:admin")(http.HandlerFunc(admin))))
+```
+
+`RequireToken` puts a `*TokenUser` on the request context (`TokenUserFromContext`): `Subject`,
+`ClientID`, `Scopes`, `Roles`, `SID`, `OrgID`, `ACR`, `AMR` and `AuthTime`. A client credentials
+token is valid too; its `Subject` is the client and it has no user claims, so it can pass a scope
+guard but never a role or step-up guard. `Authenticate` does the same check without answering.
+
+The keys come from `<Issuer>/.well-known/openid-configuration`, whose `issuer` must equal
+`Issuer` exactly and whose `jwks_uri` must be https when the issuer is. Set `JWKSURI` to skip
+discovery. If discovery or the key set cannot be fetched, the request is refused with 401
+(discovery is retried at most every 5 seconds); it never answers 500.
+
+A token is accepted only when it is RS256 with `typ` `at+jwt`, a `kid` the key set publishes for
+RS256 signatures and no `crit` header; issued by `Issuer` for `Audience`; in date (5 seconds
+leeway); with a `sub` and a `client_id`; and without a `typ` claim, which marks the provider's
+own session tokens. A token bound to a key by a `cnf` claim is refused unless `Confirm` accepts
+it, which is where a DPoP proof check goes.
+
+| Outcome | Status | `WWW-Authenticate` | Body |
+| --- | --- | --- | --- |
+| No bearer token | 401 | `Bearer` | `{"error":"missing_token"}` |
+| Token does not verify | 401 | `Bearer error="invalid_token"` | `{"error":"invalid_token"}` |
+| `RequireScope` (every scope) | 403 | `Bearer error="insufficient_scope", scope="..."` | `{"error":"insufficient_scope","scope":"..."}` |
+| `RequireRole` (any role) | 403 | none | `{"error":"insufficient_role"}` |
+| `RequireStepUp` | 401 | RFC 9470 `insufficient_user_authentication` challenge | the same members as JSON |
+
+`RequireRole` matches roles as `@seamless-auth/types` does (`RoleGrantsAccess`): `billing:*` and
+`billing` grant `billing:invoices`, and `orders:write` grants `orders:read`. `RequireStepUp`
+checks `acr` against `ACRValues` (listing `phr` also accepts `phrh`), every method in `AMR`, and
+`auth_time` against `MaxAge`, then answers with the `acr_values` and `max_age` the client should
+ask the provider for. Guards go inside `RequireToken`; on their own they answer as a missing
+token.
+
+With Gin, wrap the middleware:
+
+```go
+func wrap(mw func(http.Handler) http.Handler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		passed := false
+		mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			c.Request, passed = r, true
+		})).ServeHTTP(c.Writer, c.Request)
+		if !passed {
+			c.Abort()
+		}
+	}
+}
+
+g.GET("/orders", wrap(rs.RequireToken), wrap(rs.RequireScope("orders:read")), list)
+```
+
 ## Options
 
 | Option | Default | Purpose |
