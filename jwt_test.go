@@ -1,6 +1,7 @@
 package seamlessauth
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,7 +18,15 @@ func TestHS256RoundTrip(t *testing.T) {
 	if _, err := verifyHS256(token, "another-secret-another-secret-another"); err == nil {
 		t.Fatal("verified under the wrong secret")
 	}
-	if _, err := verifyHS256(token[:len(token)-2]+"xx", testSecret); err == nil {
+	// Replacing trailing characters can leave the decoded bytes unchanged, since
+	// the last character carries padding bits, so alter a decoded byte instead.
+	dot := strings.LastIndexByte(token, '.')
+	sig, err := b64.DecodeString(token[dot+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig[0] ^= 1
+	if _, err := verifyHS256(token[:dot+1]+b64.EncodeToString(sig), testSecret); err == nil {
 		t.Fatal("verified an altered signature")
 	}
 }
