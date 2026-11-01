@@ -192,6 +192,20 @@ func TestLogoutAnswers204AndClearsEvenWhenTheAPIRefuses(t *testing.T) {
 	}
 }
 
+func TestLogoutClearsACustomPreAuthCookie(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("DELETE", "/logout", respond(200, map[string]any{"message": "ok"}))
+	a := newTestAdapter(t, api, func(o *Options) { o.PreAuthCookieName = "app-pre-auth" })
+	access := signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": "t"})
+
+	r := do(t, a, "DELETE", "/logout", "", withCookie(access))
+	for _, name := range []string{"seamless-access", "seamless-ephemeral", "seamless-refresh", "app-pre-auth"} {
+		if c := r.cookies[name]; c == nil || c.MaxAge >= 0 {
+			t.Fatalf("%s not cleared", name)
+		}
+	}
+}
+
 func TestDeliveryRoutesHandTheMessageToTheApplication(t *testing.T) {
 	api := newFakeAPI(t)
 	api.on("POST", "/otp/generate-login-email-otp", respond(200, map[string]any{

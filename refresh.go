@@ -188,6 +188,9 @@ func (a *Adapter) refreshRoute(r *http.Request, bearer bool) result {
 // refuses, so a browser is never left holding a session it asked to end.
 func (a *Adapter) logoutRoute(r *http.Request, bearer bool, path string) result {
 	clears := []string{a.opts.AccessCookieName, a.opts.RegistrationCookieName, a.opts.RefreshCookieName}
+	if a.opts.PreAuthCookieName != a.opts.RegistrationCookieName {
+		clears = append(clears, a.opts.PreAuthCookieName)
+	}
 
 	cred, rejected := a.credentialFor(r, "access", bearer)
 	if rejected != nil {

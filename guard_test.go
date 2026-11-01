@@ -208,3 +208,130 @@ func TestACookieSessionFailsClosedWhenTheKeySetIsUnreachable(t *testing.T) {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestRequireRole(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api)
+	token := func(claims map[string]any) string {
+		body := map[string]any{"sub": "u1", "typ": "access", "iss": api.server.URL, "aud": api.server.URL}
+		for k, v := range claims {
+			body[k] = v
+		}
+		return signRS256(t, body)
+	}
+	bearer := func(claims map[string]any) func(*http.Request) {
+		return withHeader("Authorization", "Bearer "+token(claims))
+	}
+	h := a.RequireRole("admin", "billing:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := UserFromContext(r.Context())
+		writeJSON(w, 200, map[string]any{"id": user.ID})
+	}))
+	post := func(r *http.Request) { r.Method = http.MethodPost }
+
+	cases := []struct {
+		name   string
+		setup  []func(*http.Request)
+		status int
+		body   string
+	}{
+		{"granted", []func(*http.Request){bearer(map[string]any{"roles": []string{"admin"}})}, 200, ""},
+		{"granted by another listed role", []func(*http.Request){bearer(map[string]any{"roles": []string{"billing:write"}})}, 200, ""},
+		{"granted by a wildcard", []func(*http.Request){bearer(map[string]any{"roles": []string{"billing:*"}})}, 200, ""},
+		{"granted on a cookie session", []func(*http.Request){withCookie(signedCookie(t, "seamless-access", map[string]any{
+			"sub": "u1", "token": token(map[string]any{"roles": []string{"admin"}}),
+		}))}, 200, ""},
+		{"refused", []func(*http.Request){bearer(map[string]any{"roles": []string{"user"}})}, 403, "insufficient_role"},
+		{"no roles", []func(*http.Request){bearer(nil)}, 403, "insufficient_role"},
+		// The cookie's own roles are signed only by the cookie secret.
+		{"cookie roles are not trusted", []func(*http.Request){withCookie(signedCookie(t, "seamless-access", map[string]any{
+			"sub": "u1", "token": token(map[string]any{"roles": []string{"user"}}), "roles": []string{"admin"},
+		}))}, 403, "insufficient_role"},
+		{"no session", nil, 401, "unauthenticated"},
+		{"ephemeral token", []func(*http.Request){bearer(map[string]any{"typ": "ephemeral", "roles": []string{"admin"}})}, 401, "unauthenticated"},
+		{"recovery session", []func(*http.Request){bearer(map[string]any{"roles": []string{"admin"}, "recovery": true})}, 403, "enrollment_required"},
+		{"cookie session, cross-site", []func(*http.Request){post, withHeader("Sec-Fetch-Site", "cross-site"), withCookie(signedCookie(t, "seamless-access", map[string]any{
+			"sub": "u1", "token": token(map[string]any{"roles": []string{"admin"}}),
+		}))}, 403, "cross_site_request_blocked"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := call(h, c.setup...)
+			if rec.Code != c.status {
+				t.Fatalf("status %d, want %d: %s", rec.Code, c.status, rec.Body.String())
+			}
+			if c.body != "" {
+				var got map[string]any
+				_ = json.Unmarshal(rec.Body.Bytes(), &got)
+				if len(got) != 1 || got["error"] != c.body {
+					t.Fatalf("body %s, want only error %q", rec.Body.String(), c.body)
+				}
+			}
+		})
+	}
+}
+
+func TestRequireRoleAdmitsARecoverySessionWhenAllowed(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api, func(o *Options) { o.AllowRecoverySessions = true })
+	token := signRS256(t, map[string]any{"sub": "u1", "typ": "access", "roles": []string{"admin"}, "recovery": true, "iss": api.server.URL, "aud": api.server.URL})
+	h := a.RequireRole("admin")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, 200, map[string]any{})
+	}))
+	if rec := call(h, withHeader("Authorization", "Bearer "+token)); rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRequireRolePanicsWithoutARole(t *testing.T) {
+	a := newTestAdapter(t, newFakeAPI(t))
+	for name, roles := range map[string][]string{"none": nil, "empty": {""}, "blank": {"admin", "  "}} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("no panic")
+				}
+			}()
+			a.RequireRole(roles...)
+		})
+	}
+}
+
+func TestTheOrganizationComesFromTheVerifiedToken(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api)
+	token := func(claims map[string]any) string {
+		body := map[string]any{"sub": "u1", "typ": "access", "iss": api.server.URL, "aud": api.server.URL}
+		for k, v := range claims {
+			body[k] = v
+		}
+		return signRS256(t, body)
+	}
+
+	cases := []struct {
+		name  string
+		setup func(*http.Request)
+		org   string
+	}{
+		{"cookie", withCookie(signedCookie(t, "seamless-access", map[string]any{
+			"sub": "u1", "token": token(map[string]any{"org_id": "org-1"}), "organizationId": "org-cookie",
+		})), "org-1"},
+		{"cookie without org_id", withCookie(signedCookie(t, "seamless-access", map[string]any{
+			"sub": "u1", "token": token(nil), "organizationId": "org-cookie",
+		})), ""},
+		{"bearer", withHeader("Authorization", "Bearer "+token(map[string]any{"org_id": "org-1"})), "org-1"},
+		{"bearer without org_id", withHeader("Authorization", "Bearer "+token(nil)), ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/me", nil)
+			c.setup(req)
+			user, err := a.Authenticate(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if user.OrganizationID != c.org {
+				t.Fatalf("organization %q, want %q", user.OrganizationID, c.org)
+			}
+		})
+	}
+}

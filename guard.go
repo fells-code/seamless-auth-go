@@ -12,6 +12,9 @@ type User struct {
 	Roles []string
 	Email string
 	Phone string
+	// OrganizationID is the active organization, the org_id claim of the verified
+	// access token. Empty when the session has none.
+	OrganizationID string
 	// Token is the auth API access token, for calling the API on the user's behalf.
 	Token string
 	// Recovery is a session a recovery code issued, before the user enrolled a
@@ -71,6 +74,7 @@ func (a *Adapter) session(r *http.Request) (*User, bool, error) {
 		}
 		user := userFrom(claims, token)
 		user.Roles = rolesFrom(inner)
+		user.OrganizationID = stringClaim(inner, "org_id")
 		user.Recovery = inner["recovery"] == true
 		return user, true, nil
 	}
@@ -84,6 +88,7 @@ func (a *Adapter) session(r *http.Request) (*User, bool, error) {
 		return nil, false, errUnauthenticated
 	}
 	user := userFrom(claims, token)
+	user.OrganizationID = stringClaim(claims, "org_id")
 	user.Recovery = claims["recovery"] == true
 	return user, false, nil
 }
@@ -130,6 +135,39 @@ func rolesFrom(claims map[string]any) []string {
 // for a cross-site state change, as on the auth routes, and a recovery session
 // with 403 enrollment_required unless AllowRecoverySessions is set.
 func (a *Adapter) RequireAuth(next http.Handler) http.Handler {
+	return a.requireSession(nil, next)
+}
+
+// RequireRole is RequireAuth that also answers 403 insufficient_role unless the
+// session's roles grant at least one of roles, matched as RoleGrantsAccess does.
+// The roles are those of the verified access token. It panics when given no
+// role, or an empty one.
+func (a *Adapter) RequireRole(roles ...string) func(http.Handler) http.Handler {
+	if len(roles) == 0 {
+		panic("seamlessauth: RequireRole needs at least one role")
+	}
+	for _, role := range roles {
+		if trimJS(role) == "" {
+			panic("seamlessauth: RequireRole was given an empty role")
+		}
+	}
+	roles = append([]string(nil), roles...)
+	allowed := func(user *User) bool {
+		for _, required := range roles {
+			for _, granted := range user.Roles {
+				if RoleGrantsAccess(granted, required) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return func(next http.Handler) http.Handler {
+		return a.requireSession(allowed, next)
+	}
+}
+
+func (a *Adapter) requireSession(allowed func(*User) bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, byCookie, err := a.authenticate(r)
 		if errors.Is(err, ErrEnrollmentRequired) {
@@ -147,6 +185,10 @@ func (a *Adapter) RequireAuth(next http.Handler) http.Handler {
 				a.write(w, res, false)
 				return
 			}
+		}
+		if allowed != nil && !allowed(user) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "insufficient_role"})
+			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
 	})
