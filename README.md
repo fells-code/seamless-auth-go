@@ -256,7 +256,10 @@ Deliver: func(ctx context.Context, d seamlessauth.Delivery) error {
 A delivery error answers the request with 502 `delivery_failed`. `d.Kind` is one of the
 `Delivery*` constants; a kind this version does not know is logged and not handed to you. A code
 with `d.Purpose == seamlessauth.PurposeAccountRecovery` recovers an account rather than signing
-in: word it as a warning that someone asked to recover the account.
+in: word it as a warning that someone asked to recover the account. A
+`DeliveryEnrollmentInviteEmail` carries `d.SignInURL`, the `signInUrl` of
+`SendEnrollmentInviteEmailInput` in `@seamless-auth/types`: the sign-in page, which signs nobody
+in on its own.
 
 #### Account notices
 
@@ -271,6 +274,26 @@ back as the owner being told, so set it only when both kinds really go out.
 prints without its code or links. If at least one notice is sent, the request answers as usual.
 If none is, the adapter cancels the recovery request with the cancel link's token and answers
 503 `recovery_notice_failed`, as the API does when it cannot notify the owner itself.
+
+#### Unsubscribe headers
+
+The adapter hands you what the auth API asked for; your mailer builds and sends the email. So
+custom headers, such as the one-click unsubscribe pair from
+[RFC 8058](https://www.rfc-editor.org/rfc/rfc8058), are set in your own sender, not passed through
+the adapter. Sign-in codes, magic links and enrollment invites are transactional and do not need
+them; mail your application sends on its own, such as release notes, does:
+
+```go
+headers := map[string]string{
+	"List-Unsubscribe":      "<https://app.example.com/unsubscribe?t=" + token + ">",
+	"List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+}
+err := mailer.Send(ctx, user.Email, "What's new", body, headers)
+```
+
+The unsubscribe URL must be HTTPS and accept a POST with no further confirmation. Refuse header
+values that contain a CR or LF, and never let a caller set From, To, Cc, Bcc, Subject or
+Content-Type through custom headers, as `@seamless-auth/messaging` does.
 
 ### Magic links
 
