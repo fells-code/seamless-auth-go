@@ -96,6 +96,27 @@ issuer and audience, in date, of type `access`, and for the cookie's subject. `U
 leaked `CookieSecret` cannot grant itself roles. If the JWKS cannot be fetched and no key set is
 cached, the session is refused with 401.
 
+`User.OrganizationID` is the active organization: the `org_id` claim of that verified access
+token, for a cookie or a bearer session alike, and empty when the session has none. The copy of
+the organization in the cookie is never read.
+
+### Roles
+
+`RequireRole` is `RequireAuth` that also checks the session's roles. It admits the request when
+any of the roles it lists is granted by any of the user's roles, matched as `RoleGrantsAccess`
+does (`billing:*` grants `billing:read`, `billing:write` grants `billing:read`):
+
+```go
+mux.Handle("GET /api/reports", auth.RequireRole("admin", "reports:read")(reports))
+```
+
+The roles come from the verified access token, never from the cookie. It answers the way
+`RequireAuth` does for a missing session (401 `unauthenticated`), a recovery session (403
+`enrollment_required`, unless `AllowRecoverySessions` is set) and a cross-site cookie request
+(403 `cross_site_request_blocked`), and 403 `insufficient_role` when no listed role is granted.
+No body names the user's roles or the required ones. `RequireRole` panics when given no role or
+an empty one.
+
 ### Recovery sessions
 
 Redeeming an account recovery code issues a recovery session: its access token carries
@@ -217,10 +238,10 @@ g.GET("/orders", wrap(rs.RequireToken), wrap(rs.RequireScope("orders:read")), li
 | `CookieSameSite` | `None`, or `Lax` with `InsecureCookies` | Cookie `SameSite` |
 | `AllowedOrigins` | none | The only cross-origin and same-site callers allowed to change state while cookies are `SameSite=None` |
 | `AccessCookieName`, `RefreshCookieName` | `seamless-access`, `seamless-refresh` | Session cookie names |
-| `RegistrationCookieName`, `PreAuthCookieName` | `seamless-ephemeral` | Sign-in flow cookie names |
+| `RegistrationCookieName`, `PreAuthCookieName` | `seamless-ephemeral` | Sign-in flow cookie names. Logout clears both |
 | `Deliver` | none | Sends OTP codes and magic links through your own transports |
 | `DeliverAccountNotices` | `false` | `Deliver` also sends account notices. See below |
-| `AllowRecoverySessions` | `false` | `RequireAuth` admits a recovery session |
+| `AllowRecoverySessions` | `false` | `RequireAuth` and `RequireRole` admit a recovery session |
 | `ResolveClientIP` | the connecting peer | The end user's address. See below |
 | `DisableManifestFetch` | `false` | Use only the manifest bundled with this version |
 | `HTTPClient`, `Logf` | defaults | Outbound client and logger. The client never follows a redirect: a supplied one is copied with a `CheckRedirect` that refuses them, and gets a 15 second timeout if it has none |
