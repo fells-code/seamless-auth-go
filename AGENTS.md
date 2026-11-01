@@ -52,6 +52,7 @@ guidance may extend them but must not contradict them.
 | Vet | `go vet ./...` |
 | Tests | `go test -race ./...` |
 | Conformance | see README, "Conformance" |
+| Manifest | `scripts/check-manifest.sh` (fix with `scripts/sync-manifest.sh`) |
 | API | `scripts/api-check.sh` (declare a breaking change as `feat!:`) |
 
 The module targets Go 1.22. Do not use standard library APIs newer than that (CI runs 1.22).
@@ -102,5 +103,8 @@ hand:
 - Merging that PR runs the checks, tags `vX.Y.Z` and creates the GitHub release.
 - `scripts/api-check.sh` (the `api` workflow) runs gorelease on every PR and fails one that breaks
   the public API without declaring it.
+- The bundled manifest must match the one seamless-auth-api main publishes. The `manifest`
+  workflow checks it on every PR, on `main` and daily. Update it with `scripts/sync-manifest.sh`
+  in a `fix:` commit so the new routes ship in a patch release.
 
 A v2 needs the module path to end in `/v2` first.
