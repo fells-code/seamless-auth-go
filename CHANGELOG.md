@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/fells-code/seamless-auth-go/compare/v0.4.0...v0.5.0) (2026-11-01)
+
+
+### Added
+
+* add a first-party role guard and the organization on User ([81f1972](https://github.com/fells-code/seamless-auth-go/commit/81f1972c4974b0d3af781de4e30f0ba215926853)), closes [#25](https://github.com/fells-code/seamless-auth-go/issues/25)
+* first-party role guard and the organization on User ([85aacec](https://github.com/fells-code/seamless-auth-go/commit/85aacecb83a9430e598501422c7cf6df3347198c))
+
+
+### Fixed
+
+* clear a custom pre-auth cookie on logout ([9777d29](https://github.com/fells-code/seamless-auth-go/commit/9777d2959daf04078294b69ac2c0eed74aecf01f)), closes [#25](https://github.com/fells-code/seamless-auth-go/issues/25)
+* sync the bundled adapter manifest with API 0.21.1 ([334848c](https://github.com/fells-code/seamless-auth-go/commit/334848c94f415feb55947cb18e9a792f14bedf1b)), closes [#24](https://github.com/fells-code/seamless-auth-go/issues/24)
+* sync the bundled adapter manifest with API 0.21.1 and check it in CI ([96d380b](https://github.com/fells-code/seamless-auth-go/commit/96d380b68e0277802e21f9cca4382af1abfde73a))
+
 ## [0.4.0](https://github.com/fells-code/seamless-auth-go/compare/v0.3.0...v0.4.0) (2026-11-01)
 
 
