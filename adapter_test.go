@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestLoginStoresThePreAuthTokenAndPicksTheBody(t *testing.T) {
@@ -101,8 +102,11 @@ func TestBearerTransportReturnsTheWholeBodyAndNoCookies(t *testing.T) {
 func TestAMissingAccessCookieIsRestoredFromTheRefreshCookieOnce(t *testing.T) {
 	api := newFakeAPI(t)
 	var refreshes atomic.Int32
+	// Held open so every tab arrives while the rotation is in flight, which is
+	// the only time it is shared.
 	api.on("POST", "/refresh", func(w http.ResponseWriter, _ *http.Request) {
 		refreshes.Add(1)
+		time.Sleep(300 * time.Millisecond)
 		writeJSON(w, 200, session(t, api, "u1"))
 	})
 	api.on("GET", "/users/me", respond(200, map[string]any{"user": map[string]any{"id": "u1"}}))

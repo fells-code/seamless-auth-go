@@ -5,13 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
-	"time"
 )
-
-// A refresh token presented again within this window gets the rotation it already
-// got, so parallel requests from several tabs with one expired session all succeed
-// instead of tripping the auth API's reuse detection.
-const refreshReuseWindow = 5 * time.Second
 
 var errNoRefreshCookie = errors.New("no refresh cookie")
 
@@ -24,9 +18,8 @@ type refreshOutcome struct {
 }
 
 type refreshFlight struct {
-	done     chan struct{}
-	outcome  refreshOutcome
-	finished time.Time
+	done    chan struct{}
+	outcome refreshOutcome
 }
 
 type refresher struct {
@@ -38,17 +31,13 @@ func newRefresher() *refresher {
 	return &refresher{flights: map[string]*refreshFlight{}}
 }
 
-// do runs fn once per key at a time, and hands a successful outcome to every
-// caller with the same key for refreshReuseWindow afterwards. A failure is not
-// kept, so each caller sees it from the auth API itself.
+// do runs fn once per key at a time, so parallel requests from several tabs with
+// one expired session share a rotation instead of tripping the auth API's reuse
+// detection. Only callers that arrive while fn runs share its outcome: a refresh
+// token presented after its rotation finished goes to the auth API, which treats
+// it as reuse.
 func (f *refresher) do(key string, fn func() refreshOutcome) refreshOutcome {
 	f.mu.Lock()
-	now := time.Now()
-	for k, flight := range f.flights {
-		if !flight.finished.IsZero() && now.Sub(flight.finished) > refreshReuseWindow {
-			delete(f.flights, k)
-		}
-	}
 	if flight, ok := f.flights[key]; ok {
 		f.mu.Unlock()
 		<-flight.done
@@ -62,11 +51,7 @@ func (f *refresher) do(key string, fn func() refreshOutcome) refreshOutcome {
 
 	f.mu.Lock()
 	flight.outcome = outcome
-	if outcome.session != nil {
-		flight.finished = time.Now()
-	} else {
-		delete(f.flights, key)
-	}
+	delete(f.flights, key)
 	f.mu.Unlock()
 	close(flight.done)
 
