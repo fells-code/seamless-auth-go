@@ -11,7 +11,8 @@ import (
 // its form POST.
 //
 // Sec-Fetch-Site is the primary signal, since page script cannot forge it:
-// cross-site is refused. same-site also covers a sibling subdomain, so with
+// cross-site is refused, as is an Origin of null before anything else.
+// same-site also covers a sibling subdomain, so with
 // AllowedOrigins set its Origin must be on the list too. Without the header,
 // Origin is matched against AllowedOrigins when they are set. A non-nil empty
 // AllowedOrigins is set, and allows no origin.
@@ -23,6 +24,11 @@ func (a *Adapter) checkOrigin(r *http.Request) (result, bool) {
 	blocked := errorResult(http.StatusForbidden, "cross_site_request_blocked")
 	origin := r.Header.Get("Origin")
 	listed := a.opts.AllowedOrigins != nil
+
+	// An opaque or sandboxed origin is cross-site, whatever Sec-Fetch-Site says.
+	if strings.EqualFold(strings.TrimSpace(origin), "null") {
+		return blocked, true
+	}
 
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
 		switch {
@@ -37,9 +43,6 @@ func (a *Adapter) checkOrigin(r *http.Request) (result, bool) {
 
 	if origin == "" {
 		return result{}, false
-	}
-	if origin == "null" {
-		return blocked, true
 	}
 	if !listed {
 		return result{}, false
