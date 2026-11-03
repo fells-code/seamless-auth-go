@@ -62,7 +62,8 @@ The module targets Go 1.22. Do not use standard library APIs newer than that (CI
 - `adapter.go`: `Adapter`, the request pipeline, the upstream call, writing results.
 - `routes.go`: manifest routes, credential resolution (with silent refresh), session
   verification, what a cookie-transport body may contain.
-- `refresh.go`: refresh sharing (one rotation per refresh token while it is in flight, never after), `POST /refresh`,
+- `refresh.go`: refresh sharing (one rotation per refresh token while it is in flight; for cookie transport only, a
+  successful rotation is also kept for 5 seconds for a tab replaying the same cookie, never for bearer), `POST /refresh`,
   logout.
 - `manifest.go`: parsing, matching, the live and embedded manifest.
 - `guard.go`: `RequireAuth`, `Authenticate`.

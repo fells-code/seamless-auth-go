@@ -2,7 +2,9 @@ package seamlessauth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -79,6 +81,94 @@ func TestACookieReplayInsideTheWindowSharesTheCompletedRotationOnPOSTRefresh(t *
 	}
 	if want, got := cookieClaims(t, first.cookies["seamless-refresh"]), cookieClaims(t, r.cookies["seamless-refresh"]); want["refreshToken"] != got["refreshToken"] {
 		t.Fatalf("refreshToken: first %v, replay %v", want["refreshToken"], got["refreshToken"])
+	}
+}
+
+// testClock is a clock a test moves by hand.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+func withTestClock(a *Adapter) *testClock {
+	clock := &testClock{t: time.Unix(1_700_000_000, 0)}
+	a.refreshes.now = clock.now
+	return clock
+}
+
+// Once the window has passed, a replayed refresh cookie reaches the auth API,
+// so its reuse detection sees the replay.
+func TestACookieReplayAfterTheWindowReachesTheAuthAPI(t *testing.T) {
+	api := newFakeAPI(t)
+	refreshes := rotatingOnceAPI(t, api)
+	api.on("GET", "/users/me", respond(200, map[string]any{"user": map[string]any{"id": "u1"}}))
+	a := newTestAdapter(t, api)
+	clock := withTestClock(a)
+	stolen := signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"})
+
+	if r := do(t, a, "GET", "/users/me", "", withCookie(stolen)); r.status != 200 {
+		t.Fatalf("first caller: status %d body %v", r.status, r.body)
+	}
+	clock.advance(refreshKeepWindow - time.Millisecond)
+	if r := do(t, a, "GET", "/users/me", "", withCookie(stolen)); r.status != 200 || refreshes.Load() != 1 {
+		t.Fatalf("inside the window: status %d, %d refresh calls", r.status, refreshes.Load())
+	}
+	clock.advance(time.Millisecond)
+
+	r := do(t, a, "GET", "/users/me", "", withCookie(stolen))
+	if refreshes.Load() != 2 {
+		t.Fatalf("the replay did not reach the auth API: %d refresh calls, replay got status %d, new access cookie issued %v",
+			refreshes.Load(), r.status, r.cookies["seamless-access"] != nil && r.cookies["seamless-access"].MaxAge > 0)
+	}
+	if r.status != 401 || r.cookies["seamless-access"] == nil || r.cookies["seamless-access"].MaxAge >= 0 {
+		t.Fatalf("replay: status %d cookies %v", r.status, r.cookies)
+	}
+}
+
+// Kept rotations are dropped once they expire, so the map holds at most the
+// rotations of the last window.
+func TestKeptRotationsArePruned(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("POST", "/refresh", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, session(t, api, "u1"))
+	})
+	a := newTestAdapter(t, api)
+	clock := withTestClock(a)
+	refresh := func(token string) {
+		r := do(t, a, "POST", "/refresh", "",
+			withCookie(signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": token})))
+		if r.status != 200 {
+			t.Fatalf("status %d body %v", r.status, r.body)
+		}
+	}
+	kept := func() (int, int) {
+		a.refreshes.mu.Lock()
+		defer a.refreshes.mu.Unlock()
+		return len(a.refreshes.kept), len(a.refreshes.order)
+	}
+
+	for i := 0; i < 50; i++ {
+		refresh(fmt.Sprintf("r%d", i))
+	}
+	if n, o := kept(); n != 50 || o != 50 {
+		t.Fatalf("kept %d, order %d", n, o)
+	}
+	clock.advance(refreshKeepWindow)
+	refresh("fresh")
+	if n, o := kept(); n != 1 || o != 1 {
+		t.Fatalf("after the window: kept %d, order %d", n, o)
 	}
 }
 

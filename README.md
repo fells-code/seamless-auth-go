@@ -89,6 +89,11 @@ both are present. It reads the `Cookie` header itself, so it works on any route.
 refresh: the auth routes refresh a browser session silently, and a bearer client calls
 `POST /auth/refresh` itself. `Authenticate` does the same check without answering.
 
+Tabs holding one refresh cookie share its rotation: requests that arrive while it runs wait
+for it, and a request presenting the same refresh cookie up to 5 seconds after it succeeded gets
+the same session without another call. A bearer refresh token is shared only while its rotation
+runs; presented again afterwards it goes to the auth API, which treats it as reuse.
+
 A session cookie is signed with `CookieSecret`, but the auth API access token inside it is
 verified too, the same way as a bearer token: RS256 against the API's JWKS, with the expected
 issuer and audience, in date, of type `access`, and for the cookie's subject. `User.Roles` (and

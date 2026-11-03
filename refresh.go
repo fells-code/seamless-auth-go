@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
 
 var (
@@ -61,26 +62,54 @@ type refreshFlight struct {
 	outcome refreshOutcome
 }
 
+// refreshKeepWindow is how long a completed cookie-transport rotation is kept
+// for a tab that presents the same refresh cookie a moment later.
+const refreshKeepWindow = 5 * time.Second
+
+type keptRefresh struct {
+	outcome refreshOutcome
+	expires time.Time
+}
+
+type keptKey struct {
+	key     string
+	expires time.Time
+}
+
 type refresher struct {
 	mu      sync.Mutex
 	flights map[string]*refreshFlight
+	kept    map[string]keptRefresh
+	// order holds kept keys by expiry, so pruning stops at the first live one.
+	order []keptKey
+	now   func() time.Time
 }
 
 func newRefresher() *refresher {
-	return &refresher{flights: map[string]*refreshFlight{}}
+	return &refresher{flights: map[string]*refreshFlight{}, kept: map[string]keptRefresh{}, now: time.Now}
 }
 
 // do runs fn once per key at a time, so parallel requests from several tabs with
 // one expired session share a rotation instead of tripping the auth API's reuse
-// detection. Only callers that arrive while fn runs share its outcome: a refresh
-// token presented after its rotation finished goes to the auth API, which treats
-// it as reuse.
-func (f *refresher) do(key string, fn func() refreshOutcome) refreshOutcome {
+// detection. Callers that arrive while fn runs share its outcome. With keep (cookie
+// transport only), a successful outcome is also kept for refreshKeepWindow, for a
+// tab presenting the same refresh cookie just after the rotation finished. Without
+// it, a refresh token presented after its rotation finished goes to the auth API,
+// which treats it as reuse.
+func (f *refresher) do(key string, keep bool, fn func() refreshOutcome) refreshOutcome {
 	f.mu.Lock()
+	now := f.now()
+	f.prune(now)
 	if flight, ok := f.flights[key]; ok {
 		f.mu.Unlock()
 		<-flight.done
 		return flight.outcome
+	}
+	if keep {
+		if kept, ok := f.kept[key]; ok {
+			f.mu.Unlock()
+			return kept.outcome
+		}
 	}
 	flight := &refreshFlight{done: make(chan struct{})}
 	f.flights[key] = flight
@@ -91,10 +120,28 @@ func (f *refresher) do(key string, fn func() refreshOutcome) refreshOutcome {
 	f.mu.Lock()
 	flight.outcome = outcome
 	delete(f.flights, key)
+	if keep && outcome.session != nil {
+		expires := f.now().Add(refreshKeepWindow)
+		f.kept[key] = keptRefresh{outcome: outcome, expires: expires}
+		f.order = append(f.order, keptKey{key: key, expires: expires})
+	}
 	f.mu.Unlock()
 	close(flight.done)
 
 	return outcome
+}
+
+// prune drops kept rotations that have expired. f.mu must be held.
+func (f *refresher) prune(now time.Time) {
+	i := 0
+	for ; i < len(f.order) && !now.Before(f.order[i].expires); i++ {
+		if kept, ok := f.kept[f.order[i].key]; ok && kept.expires.Equal(f.order[i].expires) {
+			delete(f.kept, f.order[i].key)
+		}
+	}
+	if i > 0 {
+		f.order = append(f.order[:0], f.order[i:]...)
+	}
 }
 
 // silentRefresh rotates the session held in the refresh cookie.
@@ -113,11 +160,11 @@ func (a *Adapter) silentRefresh(r *http.Request) (map[string]any, []cookieWrite,
 	})
 }
 
-// refreshSession rotates a refresh token once per key, as refresher.do shares it,
-// and builds the cookies for the session it returns. held is read only by the
+// refreshSession rotates a cookie-transport refresh token once per key, as
+// refresher.do shares and keeps it, and builds the cookies for the session it returns. held is read only by the
 // caller that makes the call.
 func (a *Adapter) refreshSession(r *http.Request, key string, held func() (sub, refreshToken string)) (map[string]any, []cookieWrite, error) {
-	outcome := a.refreshes.do(key, func() refreshOutcome {
+	outcome := a.refreshes.do(key, true, func() refreshOutcome {
 		sub, refreshToken := held()
 		if refreshToken == "" {
 			return refreshOutcome{err: errInvalidRefreshCookie}
@@ -182,7 +229,7 @@ func (a *Adapter) refreshRoute(r *http.Request, bearer bool) result {
 			return errorResult(http.StatusUnauthorized, "refresh token required")
 		}
 
-		outcome := a.refreshes.do("bearer:"+token, func() refreshOutcome {
+		outcome := a.refreshes.do("bearer:"+token, false, func() refreshOutcome {
 			return a.rotate(r, token, a.tokens.proxyAuthorization())
 		})
 		if outcome.session == nil {
