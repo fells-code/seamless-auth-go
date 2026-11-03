@@ -22,29 +22,116 @@ func rotatingOnceAPI(t *testing.T, api *fakeAPI) *atomic.Int32 {
 	return &n
 }
 
-// A refresh token replayed after its rotation finished must reach the auth API,
-// so its reuse detection sees the replay, rather than be handed the new session.
-func TestACompletedCookieRotationIsNotReplayedToALaterCaller(t *testing.T) {
+func cookieClaims(t *testing.T, c *http.Cookie) map[string]any {
+	t.Helper()
+	if c == nil || c.MaxAge <= 0 {
+		t.Fatalf("cookie not set: %+v", c)
+	}
+	parsed, err := parseJWT(c.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed.claims
+}
+
+// Several tabs can hold one refresh cookie, and one finishing its rotation a
+// moment before another presents the cookie must not sign the others out. A
+// cookie replayed within the window gets the rotated session without a call.
+func TestACookieReplayInsideTheWindowSharesTheCompletedRotation(t *testing.T) {
 	api := newFakeAPI(t)
 	refreshes := rotatingOnceAPI(t, api)
 	api.on("GET", "/users/me", respond(200, map[string]any{"user": map[string]any{"id": "u1"}}))
 	a := newTestAdapter(t, api)
-	stolen := signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"})
+	held := signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"})
 
-	if r := do(t, a, "GET", "/users/me", "", withCookie(stolen)); r.status != 200 {
-		t.Fatalf("first caller: status %d body %v", r.status, r.body)
+	first := do(t, a, "GET", "/users/me", "", withCookie(held))
+	if first.status != 200 {
+		t.Fatalf("first caller: status %d body %v", first.status, first.body)
 	}
 
-	r := do(t, a, "GET", "/users/me", "", withCookie(stolen))
-	if refreshes.Load() != 2 {
-		t.Fatalf("the replay did not reach the auth API: %d refresh calls, replay got status %d, new access cookie issued %v",
-			refreshes.Load(), r.status, r.cookies["seamless-access"] != nil && r.cookies["seamless-access"].MaxAge > 0)
+	r := do(t, a, "GET", "/users/me", "", withCookie(held))
+	if refreshes.Load() != 1 {
+		t.Fatalf("the replay reached the auth API: %d refresh calls, status %d", refreshes.Load(), r.status)
 	}
-	if r.status != 401 || r.cookies["seamless-access"] == nil || r.cookies["seamless-access"].MaxAge >= 0 {
-		t.Fatalf("replay: status %d cookies %v", r.status, r.cookies)
+	if r.status != 200 {
+		t.Fatalf("replay: status %d body %v", r.status, r.body)
+	}
+	for _, name := range []string{"seamless-access", "seamless-refresh"} {
+		want, got := cookieClaims(t, first.cookies[name]), cookieClaims(t, r.cookies[name])
+		for _, claim := range []string{"sub", "token", "refreshToken", "sessionId"} {
+			if want[claim] != got[claim] {
+				t.Fatalf("%s %s: first %v, replay %v", name, claim, want[claim], got[claim])
+			}
+		}
 	}
 }
 
+func TestACookieReplayInsideTheWindowSharesTheCompletedRotationOnPOSTRefresh(t *testing.T) {
+	api := newFakeAPI(t)
+	refreshes := rotatingOnceAPI(t, api)
+	a := newTestAdapter(t, api)
+	held := signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"})
+
+	first := do(t, a, "POST", "/refresh", "", withCookie(held))
+	r := do(t, a, "POST", "/refresh", "", withCookie(held))
+	if first.status != 200 || r.status != 200 || refreshes.Load() != 1 {
+		t.Fatalf("first %d, replay %d body %v, %d refresh calls", first.status, r.status, r.body, refreshes.Load())
+	}
+	if want, got := cookieClaims(t, first.cookies["seamless-refresh"]), cookieClaims(t, r.cookies["seamless-refresh"]); want["refreshToken"] != got["refreshToken"] {
+		t.Fatalf("refreshToken: first %v, replay %v", want["refreshToken"], got["refreshToken"])
+	}
+}
+
+// The completed window is for cookie transport only: the same refresh token
+// presented as a bearer goes to the auth API, whose reuse detection sees it.
+func TestABearerReplayInsideTheCookieWindowStillReachesTheAuthAPI(t *testing.T) {
+	api := newFakeAPI(t)
+	refreshes := rotatingOnceAPI(t, api)
+	api.on("GET", "/users/me", respond(200, map[string]any{"user": map[string]any{"id": "u1"}}))
+	a := newTestAdapter(t, api)
+	held := signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"})
+
+	if r := do(t, a, "GET", "/users/me", "", withCookie(held)); r.status != 200 {
+		t.Fatalf("cookie caller: status %d body %v", r.status, r.body)
+	}
+
+	r := do(t, a, "POST", "/refresh", "",
+		withHeader(transportHeader, "bearer"), withHeader("Authorization", "Bearer r1"))
+	if refreshes.Load() != 2 {
+		t.Fatalf("the bearer replay did not reach the auth API: %d refresh calls, status %d body %v",
+			refreshes.Load(), r.status, r.body)
+	}
+	if r.status != 401 || r.body["error"] != "refresh_token_reused" {
+		t.Fatalf("bearer replay: status %d body %v", r.status, r.body)
+	}
+}
+
+// A rotation that failed is never kept: the next caller gets a fresh attempt.
+func TestAFailedCookieRotationIsNotKept(t *testing.T) {
+	api := newFakeAPI(t)
+	var n atomic.Int32
+	api.on("POST", "/refresh", func(w http.ResponseWriter, _ *http.Request) {
+		if n.Add(1) == 1 {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "unavailable"})
+			return
+		}
+		writeJSON(w, http.StatusOK, session(t, api, "u1"))
+	})
+	api.on("GET", "/users/me", respond(200, map[string]any{"user": map[string]any{"id": "u1"}}))
+	a := newTestAdapter(t, api)
+	held := signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"})
+
+	if r := do(t, a, "GET", "/users/me", "", withCookie(held)); r.status == 200 {
+		t.Fatalf("first caller: status %d", r.status)
+	}
+	if r := do(t, a, "GET", "/users/me", "", withCookie(held)); r.status != 200 || n.Load() != 2 {
+		t.Fatalf("retry: status %d body %v, %d refresh calls", r.status, r.body, n.Load())
+	}
+}
+
+// A bearer refresh token replayed after its rotation finished must reach the
+// auth API, so its reuse detection sees the replay, rather than be handed the
+// new session.
 func TestACompletedBearerRotationIsNotReplayedToALaterCaller(t *testing.T) {
 	api := newFakeAPI(t)
 	refreshes := rotatingOnceAPI(t, api)
