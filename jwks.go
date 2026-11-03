@@ -90,8 +90,10 @@ type jwk struct {
 	Alg json.RawMessage `json:"alg"`
 }
 
+// fetch runs detached from the request that asks for it: a failed fetch holds
+// off every caller for a while, so one caller going away must not fail it.
 func (c *jwksCache) fetch(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), jwksFetchTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)

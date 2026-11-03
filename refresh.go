@@ -1,13 +1,52 @@
 package seamlessauth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 )
 
-var errNoRefreshCookie = errors.New("no refresh cookie")
+var (
+	errNoRefreshCookie      = errors.New("no refresh cookie")
+	errInvalidRefreshCookie = errors.New("invalid refresh cookie")
+)
+
+// refreshAnswered is a refresh the auth API answered without a session.
+type refreshAnswered struct {
+	status int
+	body   any
+	isJSON bool
+}
+
+func (e *refreshAnswered) Error() string { return fmt.Sprintf("refresh answered %d", e.status) }
+
+// refreshRejected reports whether a refresh failed for good: the auth API
+// refused the token, or the refresh cookie cannot be read. After a network
+// failure or any other answer the token may still be good, or rotated with the
+// answer lost, so the session is kept for the next attempt.
+func refreshRejected(err error) bool {
+	var answered *refreshAnswered
+	if errors.As(err, &answered) {
+		return answered.status == http.StatusUnauthorized
+	}
+	return errors.Is(err, errInvalidRefreshCookie)
+}
+
+// refreshFailure answers a refresh that produced no session: rejected when it
+// failed for good, else the auth API's answer or upstream_unavailable, with the
+// cookies left alone.
+func refreshFailure(err error, rejected result) result {
+	if refreshRejected(err) {
+		return rejected
+	}
+	var answered *refreshAnswered
+	if errors.As(err, &answered) {
+		return failure(answered.status, answered.body, answered.isJSON)
+	}
+	return errorResult(http.StatusBadGateway, "upstream_unavailable")
+}
 
 type refreshOutcome struct {
 	session map[string]any
@@ -81,7 +120,7 @@ func (a *Adapter) refreshSession(r *http.Request, key string, held func() (sub, 
 	outcome := a.refreshes.do(key, func() refreshOutcome {
 		sub, refreshToken := held()
 		if refreshToken == "" {
-			return refreshOutcome{err: errors.New("invalid refresh cookie")}
+			return refreshOutcome{err: errInvalidRefreshCookie}
 		}
 
 		service, err := a.tokens.sign(sub, map[string]any{"refreshToken": refreshToken})
@@ -92,7 +131,7 @@ func (a *Adapter) refreshSession(r *http.Request, key string, held func() (sub, 
 	})
 	if outcome.session == nil {
 		if outcome.err == nil {
-			outcome.err = fmt.Errorf("refresh answered %d", outcome.status)
+			outcome.err = &refreshAnswered{status: outcome.status, body: outcome.body, isJSON: outcome.isJSON}
 		}
 		return nil, nil, outcome.err
 	}
@@ -108,8 +147,14 @@ func (a *Adapter) refreshSession(r *http.Request, key string, held func() (sub, 
 	return outcome.session, cookies, nil
 }
 
+// rotate runs detached from the request that leads it: callers sharing the
+// rotation wait on it, and once the auth API rotates the token the old one is
+// spent, so the new session must not be lost to that caller going away.
 func (a *Adapter) rotate(r *http.Request, refreshToken, service string) refreshOutcome {
-	res, err := a.call(r.Context(), r, upstreamCall{
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), upstreamTimeout)
+	defer cancel()
+
+	res, err := a.call(ctx, r, upstreamCall{
 		method:        http.MethodPost,
 		path:          "/refresh",
 		authorization: "Bearer " + refreshToken,
@@ -157,9 +202,9 @@ func (a *Adapter) refreshRoute(r *http.Request, bearer bool) result {
 		return errorResult(http.StatusUnauthorized, "refresh token required")
 	}
 	if err != nil {
-		res := errorResult(http.StatusUnauthorized, "invalid_refresh_token")
-		res.clear = []string{a.opts.AccessCookieName, a.opts.RefreshCookieName}
-		return res
+		rejected := errorResult(http.StatusUnauthorized, "invalid_refresh_token")
+		rejected.clear = []string{a.opts.AccessCookieName, a.opts.RefreshCookieName}
+		return refreshFailure(err, rejected)
 	}
 
 	return result{
