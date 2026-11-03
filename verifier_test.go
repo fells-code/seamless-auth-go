@@ -80,17 +80,19 @@ func loadVectors(t *testing.T) verifyOnlyVectors {
 
 func vectorVerifier(t *testing.T, vectors verifyOnlyVectors, confirm func(*http.Request, map[string]any) bool) *Verifier {
 	t.Helper()
-	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// The vectors' issuer is https, so the keys must be too.
+	jwks := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(vectors.JWKS)
 	}))
 	t.Cleanup(jwks.Close)
 	v, err := NewVerifier(VerifierOptions{
-		Issuer:   vectors.Issuer,
-		Audience: vectors.Audience,
-		JWKSURI:  jwks.URL,
-		Confirm:  confirm,
-		Logf:     func(string, ...any) {},
+		Issuer:     vectors.Issuer,
+		Audience:   vectors.Audience,
+		JWKSURI:    jwks.URL,
+		Confirm:    confirm,
+		HTTPClient: jwks.Client(),
+		Logf:       func(string, ...any) {},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -473,12 +475,6 @@ func TestVerifierClaimTypes(t *testing.T) {
 		if rec := serveToken(v, p.sign(t, header, overrides, "")); rec.Code != http.StatusNoContent {
 			t.Errorf("%s: %d", name, rec.Code)
 		}
-	}
-}
-
-func TestVerifierAcceptsAnHTTPJWKSURIUnderAnHTTPSIssuer(t *testing.T) {
-	if _, err := NewVerifier(VerifierOptions{Issuer: "https://login.example", Audience: "a", JWKSURI: "http://keys.internal/jwks"}); err != nil {
-		t.Fatal(err)
 	}
 }
 

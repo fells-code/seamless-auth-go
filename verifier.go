@@ -29,7 +29,8 @@ type VerifierOptions struct {
 	// Audience is this API's resource identifier. A token's aud must name it.
 	Audience string
 	// JWKSURI fetches the provider's keys from here instead of discovering them
-	// from Issuer's /.well-known/openid-configuration.
+	// from Issuer's /.well-known/openid-configuration. It must be https when
+	// Issuer is.
 	JWKSURI string
 	// Confirm accepts a token bound to a key by a cnf claim (RFC 7800), for
 	// example a DPoP proof's jkt. It is called only for a token that otherwise
@@ -106,6 +107,11 @@ func NewVerifier(opts VerifierOptions) (*Verifier, error) {
 	}
 	if opts.JWKSURI != "" && !isHTTPURL(opts.JWKSURI) {
 		return nil, errors.New("seamlessauth: JWKSURI must be an absolute http or https URL")
+	}
+	// Keys fetched over plain http can be swapped in transit, which would let
+	// anyone on the path mint tokens for an https issuer.
+	if u, _ := url.Parse(opts.JWKSURI); opts.JWKSURI != "" && issuer.Scheme == "https" && u.Scheme != "https" {
+		return nil, errors.New("seamlessauth: JWKSURI must be https when Issuer is https")
 	}
 	if opts.Logf == nil {
 		opts.Logf = log.Printf

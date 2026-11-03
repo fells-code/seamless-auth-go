@@ -45,8 +45,8 @@ func TestTheOriginGuard(t *testing.T) {
 		{"same-origin, unlisted origin", listed, "POST", []func(*http.Request){site("same-origin"), origin("https://auth-adapter.example.com")}, false},
 		{"cross-site, listed origin", listed, "POST", []func(*http.Request){site("cross-site"), origin("https://app.example.com")}, true},
 
-		{"lax cookies, cross-site", lax, "POST", []func(*http.Request){site("cross-site")}, false},
-		{"lax cookies, same-site other origin", lax, "POST", []func(*http.Request){site("same-site"), origin("https://evil.example.com")}, false},
+		{"lax cookies, cross-site", lax, "POST", []func(*http.Request){site("cross-site")}, true},
+		{"lax cookies, same-site other origin", lax, "POST", []func(*http.Request){site("same-site"), origin("https://evil.example.com")}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -187,11 +187,25 @@ func TestABodyLessUnsafeRequestPassesWithAJSONContentTypeOrTheTransportHeader(t 
 
 	for _, setup := range [][]func(*http.Request){
 		{withHeader("Content-Type", "application/json")},
-		{withHeader(transportHeader, "cookie")},
+		{withoutHeader("Content-Type"), withHeader(transportHeader, "cookie")},
 	} {
 		if r := do(t, a, "POST", "/recovery-codes", "", append(setup, cookie)...); r.status != 200 {
 			t.Fatalf("status %d body %v", r.status, r.body)
 		}
+	}
+}
+
+func TestABodyLessLogoutWithoutAContentTypeIsRefused(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("DELETE", "/logout", respond(200, map[string]any{"message": "ok"}))
+	a := newTestAdapter(t, api)
+	cookie := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
+
+	if r := do(t, a, "DELETE", "/logout", "", cookie, withoutHeader("Content-Type")); r.status != http.StatusUnsupportedMediaType {
+		t.Fatalf("status %d body %v", r.status, r.body)
+	}
+	if n := len(api.callsTo("DELETE", "/logout")); n != 0 {
+		t.Fatalf("reached the auth API %d times", n)
 	}
 }
 

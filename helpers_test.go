@@ -202,7 +202,9 @@ func do(t *testing.T, a *Adapter, method, target string, body string, setup ...f
 		reader = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, target, reader)
-	if body != "" {
+	// As the client sends it, even with no body: an unsafe request needs a JSON
+	// content type or the transport header. Remove it with withoutHeader.
+	if body != "" || isUnsafeMethod(method) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	for _, s := range setup {

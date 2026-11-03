@@ -74,6 +74,10 @@ func (a *Adapter) serve(w http.ResponseWriter, r *http.Request) {
 		a.write(w, res, false)
 		return
 	}
+	if res, refused := a.checkContentType(r); refused {
+		a.write(w, res, false)
+		return
+	}
 
 	bearer := strings.EqualFold(r.Header.Get(transportHeader), "bearer")
 	path := r.URL.EscapedPath()
