@@ -80,17 +80,19 @@ func loadVectors(t *testing.T) verifyOnlyVectors {
 
 func vectorVerifier(t *testing.T, vectors verifyOnlyVectors, confirm func(*http.Request, map[string]any) bool) *Verifier {
 	t.Helper()
-	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// The vectors' issuer is https, so the keys must be too.
+	jwks := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(vectors.JWKS)
 	}))
 	t.Cleanup(jwks.Close)
 	v, err := NewVerifier(VerifierOptions{
-		Issuer:   vectors.Issuer,
-		Audience: vectors.Audience,
-		JWKSURI:  jwks.URL,
-		Confirm:  confirm,
-		Logf:     func(string, ...any) {},
+		Issuer:     vectors.Issuer,
+		Audience:   vectors.Audience,
+		JWKSURI:    jwks.URL,
+		Confirm:    confirm,
+		HTTPClient: jwks.Client(),
+		Logf:       func(string, ...any) {},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -476,12 +478,6 @@ func TestVerifierClaimTypes(t *testing.T) {
 	}
 }
 
-func TestVerifierAcceptsAnHTTPJWKSURIUnderAnHTTPSIssuer(t *testing.T) {
-	if _, err := NewVerifier(VerifierOptions{Issuer: "https://login.example", Audience: "a", JWKSURI: "http://keys.internal/jwks"}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestVerifierReadsHeaderMembersByExactName(t *testing.T) {
 	p := newFakeProvider(t, false)
 	v := p.verifier(t)
@@ -579,5 +575,16 @@ func TestRoleGrantsAccess(t *testing.T) {
 		if got := RoleGrantsAccess(c.granted, c.required); got != c.want {
 			t.Errorf("RoleGrantsAccess(%q, %q) = %v", c.granted, c.required, got)
 		}
+	}
+}
+
+// Keys fetched over plain http can be swapped in transit, which would let anyone
+// on the path mint tokens for an https issuer.
+func TestVerifierRefusesAnHTTPJWKSURIUnderAnHTTPSIssuer(t *testing.T) {
+	if _, err := NewVerifier(VerifierOptions{Issuer: "https://login.example", Audience: "a", JWKSURI: "http://keys.internal/jwks"}); err == nil {
+		t.Fatal("accepted an http JWKSURI under an https issuer")
+	}
+	if _, err := NewVerifier(VerifierOptions{Issuer: "http://login.example", Audience: "a", JWKSURI: "http://keys.internal/jwks"}); err != nil {
+		t.Fatalf("refused an http JWKSURI under an http issuer: %v", err)
 	}
 }

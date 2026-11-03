@@ -45,8 +45,8 @@ func TestTheOriginGuard(t *testing.T) {
 		{"same-origin, unlisted origin", listed, "POST", []func(*http.Request){site("same-origin"), origin("https://auth-adapter.example.com")}, false},
 		{"cross-site, listed origin", listed, "POST", []func(*http.Request){site("cross-site"), origin("https://app.example.com")}, true},
 
-		{"lax cookies, cross-site", lax, "POST", []func(*http.Request){site("cross-site")}, false},
-		{"lax cookies, same-site other origin", lax, "POST", []func(*http.Request){site("same-site"), origin("https://evil.example.com")}, false},
+		{"lax cookies, cross-site", lax, "POST", []func(*http.Request){site("cross-site")}, true},
+		{"lax cookies, same-site other origin", lax, "POST", []func(*http.Request){site("same-site"), origin("https://evil.example.com")}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -89,5 +89,205 @@ func TestACookieSessionGetsTheSameSiteAllowlistCheck(t *testing.T) {
 	}
 	if rec := call(guarded(a), post, cookie, sameSite, withHeader("Origin", "https://app.example.com")); rec.Code != 200 {
 		t.Fatalf("listed origin: status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A sibling subdomain is same-site, so SameSite=Lax cookies ride along on its
+// form POST. The origin check has to run whatever the SameSite setting.
+func TestASameSiteFormPostIsCheckedUnderLaxCookies(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("POST", "/recovery-codes", respond(200, map[string]any{"codes": []string{"a"}}))
+	a := newTestAdapter(t, api, func(o *Options) {
+		o.CookieSameSite = http.SameSiteLaxMode
+		o.AllowedOrigins = []string{"https://app.example.com"}
+	})
+	cookie := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
+
+	r := do(t, a, "POST", "/recovery-codes", "", cookie,
+		withHeader("Sec-Fetch-Site", "same-site"),
+		withHeader("Origin", "https://evil.example.com"),
+		withHeader("Content-Type", "application/x-www-form-urlencoded"))
+
+	if r.status != http.StatusForbidden || r.body["error"] != "cross_site_request_blocked" {
+		t.Fatalf("status %d body %v", r.status, r.body)
+	}
+	if n := len(api.callsTo("POST", "/recovery-codes")); n != 0 {
+		t.Fatalf("reached the auth API %d times", n)
+	}
+}
+
+func TestACrossSiteRequestIsRefusedUnderLaxCookies(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api, func(o *Options) { o.CookieSameSite = http.SameSiteLaxMode })
+	for _, setup := range [][]func(*http.Request){
+		{withHeader("Sec-Fetch-Site", "cross-site")},
+		{withHeader("Origin", "null")},
+	} {
+		if r := do(t, a, "POST", "/magic-link", `{}`, setup...); r.status != http.StatusForbidden {
+			t.Fatalf("status %d body %v", r.status, r.body)
+		}
+	}
+}
+
+func TestTheGuardChecksASameSiteCookieRequestUnderLaxCookies(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api, func(o *Options) {
+		o.CookieSameSite = http.SameSiteLaxMode
+		o.AllowedOrigins = []string{"https://app.example.com"}
+	})
+	cookie := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
+	post := func(r *http.Request) { r.Method = http.MethodPost }
+
+	rec := call(guarded(a), post, cookie, withHeader("Sec-Fetch-Site", "same-site"), withHeader("Origin", "https://evil.example.com"))
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "cross_site_request_blocked") {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A body-less form POST carries no JSON body for the content type check to look
+// at. Without an allowlist, and from a sibling subdomain or a browser that sends
+// no fetch metadata, nothing else stops it reaching a cookie-authenticated route.
+func TestABodyLessFormPostNeedsAJSONContentTypeOrACustomHeader(t *testing.T) {
+	for name, mutate := range map[string]func(*Options){
+		"lax":  func(o *Options) { o.CookieSameSite = http.SameSiteLaxMode },
+		"none": func(o *Options) {},
+	} {
+		for _, routePath := range []string{"/recovery-codes", "/totp/enroll/start", "/admin/applications/app-1/secret"} {
+			for _, site := range []string{"same-site", ""} {
+				t.Run(name+routePath+" "+site, func(t *testing.T) {
+					api := newFakeAPI(t)
+					api.on("POST", routePath, respond(200, map[string]any{"ok": true}))
+					a := newTestAdapter(t, api, mutate)
+					setup := []func(*http.Request){
+						withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")})),
+						withHeader("Content-Type", "application/x-www-form-urlencoded"),
+					}
+					if site != "" {
+						setup = append(setup, withHeader("Sec-Fetch-Site", site))
+					}
+
+					r := do(t, a, "POST", routePath, "", setup...)
+					if r.status != http.StatusUnsupportedMediaType || r.body["error"] != "unsupported_media_type" {
+						t.Fatalf("status %d body %v", r.status, r.body)
+					}
+					if n := len(api.callsTo("POST", routePath)); n != 0 {
+						t.Fatalf("reached the auth API %d times", n)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestABodyLessUnsafeRequestPassesWithAJSONContentTypeOrTheTransportHeader(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("POST", "/recovery-codes", respond(200, map[string]any{"ok": true}))
+	a := newTestAdapter(t, api)
+	cookie := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
+
+	for _, setup := range [][]func(*http.Request){
+		{withHeader("Content-Type", "application/json")},
+		{withoutHeader("Content-Type"), withHeader(transportHeader, "cookie")},
+	} {
+		if r := do(t, a, "POST", "/recovery-codes", "", append(setup, cookie)...); r.status != 200 {
+			t.Fatalf("status %d body %v", r.status, r.body)
+		}
+	}
+}
+
+// The client sends refresh and logout with no body and neither header, so they
+// pass the content type gate, but still get the origin check.
+func TestBodyLessRefreshAndLogoutSkipTheContentTypeGateButNotTheOriginCheck(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("DELETE", "/logout", respond(200, map[string]any{"message": "ok"}))
+	api.on("DELETE", "/logout/all", respond(200, map[string]any{"message": "ok"}))
+	refreshes := refreshingAPI(t, api)
+	a := newTestAdapter(t, api, func(o *Options) {
+		o.CookieSameSite = http.SameSiteLaxMode
+		o.AllowedOrigins = []string{"https://app.example.com"}
+	})
+	access := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
+	refresh := withCookie(signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"}))
+	noType := withoutHeader("Content-Type")
+
+	for _, path := range []string{"/logout", "/logout/all"} {
+		if r := do(t, a, "DELETE", path, "", access, noType); r.status != http.StatusNoContent {
+			t.Fatalf("%s: status %d body %v", path, r.status, r.body)
+		}
+	}
+	if r := do(t, a, "POST", "/refresh", "", refresh, noType); r.status != http.StatusOK {
+		t.Fatalf("refresh: status %d body %v", r.status, r.body)
+	}
+
+	for _, origin := range [][]func(*http.Request){
+		{withHeader("Sec-Fetch-Site", "cross-site")},
+		{withHeader("Sec-Fetch-Site", "same-site"), withHeader("Origin", "https://evil.example.com")},
+	} {
+		for _, req := range []struct{ method, path string }{{"DELETE", "/logout"}, {"DELETE", "/logout/all"}, {"POST", "/refresh"}} {
+			r := do(t, a, req.method, req.path, "", append([]func(*http.Request){access, refresh, noType}, origin...)...)
+			if r.status != http.StatusForbidden || r.body["error"] != "cross_site_request_blocked" {
+				t.Fatalf("%s %s: status %d body %v", req.method, req.path, r.status, r.body)
+			}
+		}
+	}
+	if n := len(api.callsTo("DELETE", "/logout")); n != 1 {
+		t.Fatalf("logout reached the auth API %d times", n)
+	}
+	if n := refreshes.Load(); n != 1 {
+		t.Fatalf("refresh reached the auth API %d times", n)
+	}
+}
+
+func TestABodyLessFormPostToAnotherRouteIsStillRefused(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("POST", "/recovery-codes", respond(200, map[string]any{"ok": true}))
+	a := newTestAdapter(t, api)
+	cookie := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
+
+	for _, setup := range [][]func(*http.Request){
+		{withoutHeader("Content-Type")},
+		{withHeader("Content-Type", "application/x-www-form-urlencoded")},
+	} {
+		r := do(t, a, "POST", "/recovery-codes", "", append(setup, cookie)...)
+		if r.status != http.StatusUnsupportedMediaType || r.body["error"] != "unsupported_media_type" {
+			t.Fatalf("status %d body %v", r.status, r.body)
+		}
+	}
+	if n := len(api.callsTo("POST", "/recovery-codes")); n != 0 {
+		t.Fatalf("reached the auth API %d times", n)
+	}
+}
+
+// An empty allowlist is configured, and allows no origin.
+func TestAnEmptyAllowedOriginsIsConfiguredAndStrict(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api, func(o *Options) { o.AllowedOrigins = []string{} })
+
+	for _, setup := range [][]func(*http.Request){
+		{withHeader("Origin", "https://app.example.com")},
+		{withHeader("Sec-Fetch-Site", "same-site"), withHeader("Origin", "https://app.example.com")},
+	} {
+		r := do(t, a, "POST", "/magic-link", `{}`, setup...)
+		if r.status != http.StatusForbidden || r.body["error"] != "cross_site_request_blocked" {
+			t.Fatalf("status %d body %v", r.status, r.body)
+		}
+	}
+}
+
+// An opaque or sandboxed origin is cross-site whatever else the request says.
+func TestANullOriginIsRefusedBeforeSecFetchSite(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api)
+	for _, site := range []string{"same-site", "same-origin", "none", ""} {
+		for _, origin := range []string{"null", " NULL "} {
+			setup := []func(*http.Request){withHeader("Origin", origin)}
+			if site != "" {
+				setup = append(setup, withHeader("Sec-Fetch-Site", site))
+			}
+			r := do(t, a, "POST", "/magic-link", `{}`, setup...)
+			if r.status != http.StatusForbidden || r.body["error"] != "cross_site_request_blocked" {
+				t.Errorf("Sec-Fetch-Site %s, Origin %q: status %d body %v", site, origin, r.status, r.body)
+			}
+		}
 	}
 }

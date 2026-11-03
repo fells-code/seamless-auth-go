@@ -52,8 +52,9 @@ func (a *Adapter) credentialFor(r *http.Request, kind string, bearer bool) (cred
 			return credential{authorization: "Bearer " + stringClaim(session, "token"), set: cookies}, nil
 		}
 		if !errors.Is(err, errNoRefreshCookie) {
-			res := errorResult(http.StatusUnauthorized, "Refresh failed")
-			res.clear = []string{a.opts.AccessCookieName, a.opts.RegistrationCookieName, a.opts.RefreshCookieName}
+			rejected := errorResult(http.StatusUnauthorized, "Refresh failed")
+			rejected.clear = []string{a.opts.AccessCookieName, a.opts.RegistrationCookieName, a.opts.RefreshCookieName}
+			res := refreshFailure(err, rejected)
 			return credential{}, &res
 		}
 	}

@@ -89,6 +89,11 @@ both are present. It reads the `Cookie` header itself, so it works on any route.
 refresh: the auth routes refresh a browser session silently, and a bearer client calls
 `POST /auth/refresh` itself. `Authenticate` does the same check without answering.
 
+Tabs holding one refresh cookie share its rotation: requests that arrive while it runs wait
+for it, and a request presenting the same refresh cookie up to 5 seconds after it succeeded gets
+the same session without another call. A bearer refresh token is shared only while its rotation
+runs; presented again afterwards it goes to the auth API, which treats it as reuse.
+
 A session cookie is signed with `CookieSecret`, but the auth API access token inside it is
 verified too, the same way as a bearer token: RS256 against the API's JWKS, with the expected
 issuer and audience, in date, of type `access`, and for the cookie's subject. `User.Roles` (and
@@ -132,12 +137,13 @@ new access cookie no longer carries it. A bearer client holds its own refresh to
 `POST /auth/refresh` after enrolling.
 
 A request `RequireAuth` admits on the session cookie also gets the auth routes' cross-site
-check: while cookies are `SameSite=None`, a state-changing request from another site answers
-403 `cross_site_request_blocked`. That is `Sec-Fetch-Site: cross-site`; or, with
-`AllowedOrigins` set, `Sec-Fetch-Site: same-site` (which also covers a sibling subdomain) from an
+check: whatever `CookieSameSite` is, a state-changing request from another site answers 403
+`cross_site_request_blocked` (a sibling subdomain is same-site, so even `SameSite=Lax` cookies
+ride along on its form POST). That is `Sec-Fetch-Site: cross-site`; or an `Origin` of `null`; or,
+with `AllowedOrigins` set, `Sec-Fetch-Site: same-site` (which also covers a sibling subdomain) from an
 `Origin` that is missing or not on the list; or, from a browser that sends no `Sec-Fetch-Site`,
 an `Origin` outside `AllowedOrigins`. Without `AllowedOrigins`, a same-site request passes. A
-bearer token is never attached by a browser, so it is not checked. `Authenticate` makes no such
+non-nil empty `AllowedOrigins` is set, and allows no origin. A bearer token is never attached by a browser, so it is not checked. `Authenticate` makes no such
 check.
 
 ### Request bodies
@@ -145,7 +151,15 @@ check.
 The auth routes forward a request body to the auth API as JSON, so a body must be sent as
 `application/json` (or a `+json` type). Anything else answers 415 `unsupported_media_type`: a
 cross-site form can post a `text/plain` body shaped like JSON with no CORS preflight, and read as
-JSON it would be a sign-in the user never made. The client SDKs already send JSON.
+JSON it would be a sign-in the user never made.
+
+A state-changing request (anything but `GET`, `HEAD` and `OPTIONS`) to the auth routes must
+declare a JSON `Content-Type` or carry the `X-Seamless-Auth-Transport` header (any value, for
+example `cookie`) even when it has no body. Either one makes a cross-origin browser request send a
+CORS preflight, which a form cannot. Without one it answers 415 `unsupported_media_type`.
+`POST /auth/refresh`, `DELETE /auth/logout` and `DELETE /auth/logout/all` are exempt for now,
+because current clients send them with no body and neither header; they still get the
+cross-site check.
 
 ## Verify-only mode (resource servers)
 
@@ -181,7 +195,7 @@ guard but never a role or step-up guard. `Authenticate` does the same check with
 
 The keys come from `<Issuer>/.well-known/openid-configuration`, whose `issuer` must equal
 `Issuer` exactly and whose `jwks_uri` must be https when the issuer is. Set `JWKSURI` to skip
-discovery. If discovery or the key set cannot be fetched, the request is refused with 401
+discovery; it too must be https when the issuer is, or `NewVerifier` returns an error. If discovery or the key set cannot be fetched, the request is refused with 401
 (discovery is retried at most every 5 seconds); it never answers 500.
 
 A token is accepted only when it is RS256 with `typ` `at+jwt`, a `kid` the key set publishes for
@@ -236,7 +250,7 @@ g.GET("/orders", wrap(rs.RequireToken), wrap(rs.RequireScope("orders:read")), li
 | `CookieDomain` | none | Cookie `Domain` |
 | `InsecureCookies` | `false` | Drops `Secure`, for local development over HTTP. Also lets placeholder secrets through, with a warning |
 | `CookieSameSite` | `None`, or `Lax` with `InsecureCookies` | Cookie `SameSite` |
-| `AllowedOrigins` | none | The only cross-origin and same-site callers allowed to change state while cookies are `SameSite=None` |
+| `AllowedOrigins` | none (nil) | The only cross-origin and same-site callers allowed to change state, whatever `CookieSameSite` is. An empty non-nil list allows none |
 | `AccessCookieName`, `RefreshCookieName` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `RegistrationCookieName`, `PreAuthCookieName` | `seamless-ephemeral` | Sign-in flow cookie names. Logout clears both |
 | `Deliver` | none | Sends OTP codes and magic links through your own transports |

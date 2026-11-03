@@ -1,6 +1,7 @@
 package seamlessauth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -8,12 +9,45 @@ import (
 	"time"
 )
 
-// A refresh token presented again within this window gets the rotation it already
-// got, so parallel requests from several tabs with one expired session all succeed
-// instead of tripping the auth API's reuse detection.
-const refreshReuseWindow = 5 * time.Second
+var (
+	errNoRefreshCookie      = errors.New("no refresh cookie")
+	errInvalidRefreshCookie = errors.New("invalid refresh cookie")
+)
 
-var errNoRefreshCookie = errors.New("no refresh cookie")
+// refreshAnswered is a refresh the auth API answered without a session.
+type refreshAnswered struct {
+	status int
+	body   any
+	isJSON bool
+}
+
+func (e *refreshAnswered) Error() string { return fmt.Sprintf("refresh answered %d", e.status) }
+
+// refreshRejected reports whether a refresh failed for good: the auth API
+// refused the token, or the refresh cookie cannot be read. After a network
+// failure or any other answer the token may still be good, or rotated with the
+// answer lost, so the session is kept for the next attempt.
+func refreshRejected(err error) bool {
+	var answered *refreshAnswered
+	if errors.As(err, &answered) {
+		return answered.status == http.StatusUnauthorized
+	}
+	return errors.Is(err, errInvalidRefreshCookie)
+}
+
+// refreshFailure answers a refresh that produced no session: rejected when it
+// failed for good, else the auth API's answer or upstream_unavailable, with the
+// cookies left alone.
+func refreshFailure(err error, rejected result) result {
+	if refreshRejected(err) {
+		return rejected
+	}
+	var answered *refreshAnswered
+	if errors.As(err, &answered) {
+		return failure(answered.status, answered.body, answered.isJSON)
+	}
+	return errorResult(http.StatusBadGateway, "upstream_unavailable")
+}
 
 type refreshOutcome struct {
 	session map[string]any
@@ -24,35 +58,58 @@ type refreshOutcome struct {
 }
 
 type refreshFlight struct {
-	done     chan struct{}
-	outcome  refreshOutcome
-	finished time.Time
+	done    chan struct{}
+	outcome refreshOutcome
+}
+
+// refreshKeepWindow is how long a completed cookie-transport rotation is kept
+// for a tab that presents the same refresh cookie a moment later.
+const refreshKeepWindow = 5 * time.Second
+
+type keptRefresh struct {
+	outcome refreshOutcome
+	expires time.Time
+}
+
+type keptKey struct {
+	key     string
+	expires time.Time
 }
 
 type refresher struct {
 	mu      sync.Mutex
 	flights map[string]*refreshFlight
+	kept    map[string]keptRefresh
+	// order holds kept keys by expiry, so pruning stops at the first live one.
+	order []keptKey
+	now   func() time.Time
 }
 
 func newRefresher() *refresher {
-	return &refresher{flights: map[string]*refreshFlight{}}
+	return &refresher{flights: map[string]*refreshFlight{}, kept: map[string]keptRefresh{}, now: time.Now}
 }
 
-// do runs fn once per key at a time, and hands a successful outcome to every
-// caller with the same key for refreshReuseWindow afterwards. A failure is not
-// kept, so each caller sees it from the auth API itself.
-func (f *refresher) do(key string, fn func() refreshOutcome) refreshOutcome {
+// do runs fn once per key at a time, so parallel requests from several tabs with
+// one expired session share a rotation instead of tripping the auth API's reuse
+// detection. Callers that arrive while fn runs share its outcome. With keep (cookie
+// transport only), a successful outcome is also kept for refreshKeepWindow, for a
+// tab presenting the same refresh cookie just after the rotation finished. Without
+// it, a refresh token presented after its rotation finished goes to the auth API,
+// which treats it as reuse.
+func (f *refresher) do(key string, keep bool, fn func() refreshOutcome) refreshOutcome {
 	f.mu.Lock()
-	now := time.Now()
-	for k, flight := range f.flights {
-		if !flight.finished.IsZero() && now.Sub(flight.finished) > refreshReuseWindow {
-			delete(f.flights, k)
-		}
-	}
+	now := f.now()
+	f.prune(now)
 	if flight, ok := f.flights[key]; ok {
 		f.mu.Unlock()
 		<-flight.done
 		return flight.outcome
+	}
+	if keep {
+		if kept, ok := f.kept[key]; ok {
+			f.mu.Unlock()
+			return kept.outcome
+		}
 	}
 	flight := &refreshFlight{done: make(chan struct{})}
 	f.flights[key] = flight
@@ -62,15 +119,29 @@ func (f *refresher) do(key string, fn func() refreshOutcome) refreshOutcome {
 
 	f.mu.Lock()
 	flight.outcome = outcome
-	if outcome.session != nil {
-		flight.finished = time.Now()
-	} else {
-		delete(f.flights, key)
+	delete(f.flights, key)
+	if keep && outcome.session != nil {
+		expires := f.now().Add(refreshKeepWindow)
+		f.kept[key] = keptRefresh{outcome: outcome, expires: expires}
+		f.order = append(f.order, keptKey{key: key, expires: expires})
 	}
 	f.mu.Unlock()
 	close(flight.done)
 
 	return outcome
+}
+
+// prune drops kept rotations that have expired. f.mu must be held.
+func (f *refresher) prune(now time.Time) {
+	i := 0
+	for ; i < len(f.order) && !now.Before(f.order[i].expires); i++ {
+		if kept, ok := f.kept[f.order[i].key]; ok && kept.expires.Equal(f.order[i].expires) {
+			delete(f.kept, f.order[i].key)
+		}
+	}
+	if i > 0 {
+		f.order = append(f.order[:0], f.order[i:]...)
+	}
 }
 
 // silentRefresh rotates the session held in the refresh cookie.
@@ -89,14 +160,14 @@ func (a *Adapter) silentRefresh(r *http.Request) (map[string]any, []cookieWrite,
 	})
 }
 
-// refreshSession rotates a refresh token once per key, as refresher.do shares it,
-// and builds the cookies for the session it returns. held is read only by the
+// refreshSession rotates a cookie-transport refresh token once per key, as
+// refresher.do shares and keeps it, and builds the cookies for the session it returns. held is read only by the
 // caller that makes the call.
 func (a *Adapter) refreshSession(r *http.Request, key string, held func() (sub, refreshToken string)) (map[string]any, []cookieWrite, error) {
-	outcome := a.refreshes.do(key, func() refreshOutcome {
+	outcome := a.refreshes.do(key, true, func() refreshOutcome {
 		sub, refreshToken := held()
 		if refreshToken == "" {
-			return refreshOutcome{err: errors.New("invalid refresh cookie")}
+			return refreshOutcome{err: errInvalidRefreshCookie}
 		}
 
 		service, err := a.tokens.sign(sub, map[string]any{"refreshToken": refreshToken})
@@ -107,7 +178,7 @@ func (a *Adapter) refreshSession(r *http.Request, key string, held func() (sub, 
 	})
 	if outcome.session == nil {
 		if outcome.err == nil {
-			outcome.err = fmt.Errorf("refresh answered %d", outcome.status)
+			outcome.err = &refreshAnswered{status: outcome.status, body: outcome.body, isJSON: outcome.isJSON}
 		}
 		return nil, nil, outcome.err
 	}
@@ -123,8 +194,14 @@ func (a *Adapter) refreshSession(r *http.Request, key string, held func() (sub, 
 	return outcome.session, cookies, nil
 }
 
+// rotate runs detached from the request that leads it: callers sharing the
+// rotation wait on it, and once the auth API rotates the token the old one is
+// spent, so the new session must not be lost to that caller going away.
 func (a *Adapter) rotate(r *http.Request, refreshToken, service string) refreshOutcome {
-	res, err := a.call(r.Context(), r, upstreamCall{
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), upstreamTimeout)
+	defer cancel()
+
+	res, err := a.call(ctx, r, upstreamCall{
 		method:        http.MethodPost,
 		path:          "/refresh",
 		authorization: "Bearer " + refreshToken,
@@ -152,7 +229,7 @@ func (a *Adapter) refreshRoute(r *http.Request, bearer bool) result {
 			return errorResult(http.StatusUnauthorized, "refresh token required")
 		}
 
-		outcome := a.refreshes.do("bearer:"+token, func() refreshOutcome {
+		outcome := a.refreshes.do("bearer:"+token, false, func() refreshOutcome {
 			return a.rotate(r, token, a.tokens.proxyAuthorization())
 		})
 		if outcome.session == nil {
@@ -172,9 +249,9 @@ func (a *Adapter) refreshRoute(r *http.Request, bearer bool) result {
 		return errorResult(http.StatusUnauthorized, "refresh token required")
 	}
 	if err != nil {
-		res := errorResult(http.StatusUnauthorized, "invalid_refresh_token")
-		res.clear = []string{a.opts.AccessCookieName, a.opts.RefreshCookieName}
-		return res
+		rejected := errorResult(http.StatusUnauthorized, "invalid_refresh_token")
+		rejected.clear = []string{a.opts.AccessCookieName, a.opts.RefreshCookieName}
+		return refreshFailure(err, rejected)
 	}
 
 	return result{
