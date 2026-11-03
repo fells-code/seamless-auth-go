@@ -65,6 +65,9 @@ type Verifier struct {
 type TokenUser struct {
 	Subject  string
 	ClientID string
+	// IsClient marks a client credentials token, whose Subject is its ClientID: a
+	// machine acting for itself, with no user behind it.
+	IsClient bool
 	// Scopes is the scope claim split on spaces, in order.
 	Scopes []string
 	Roles  []string
@@ -358,6 +361,7 @@ func tokenUserFrom(claims map[string]any) (*TokenUser, error) {
 	if user.ClientID, ok = claims["client_id"].(string); !ok || user.ClientID == "" {
 		return nil, errors.New("no client_id")
 	}
+	user.IsClient = user.Subject == user.ClientID
 	if exp, ok := numberClaim(claims, "exp"); ok {
 		user.ExpiresAt = timeFromSeconds(exp)
 	}
@@ -454,16 +458,45 @@ func writeMissingToken(w http.ResponseWriter) {
 // RequireToken answers 401 unless the request carries a valid access token, and
 // puts the TokenUser on the request context for next. Guards go inside it.
 func (v *Verifier) RequireToken(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, err := v.Authenticate(r)
-		if errors.Is(err, ErrMissingToken) {
-			writeMissingToken(w)
-			return
-		}
-		if err != nil {
-			writeBearerError(w, http.StatusUnauthorized, `Bearer error="invalid_token"`, map[string]string{"error": "invalid_token"})
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tokenUserKey{}, user)))
-	})
+	return v.RequireTokenWith()(next)
+}
+
+// TokenOption configures RequireTokenWith.
+type TokenOption func(*tokenOptions)
+
+type tokenOptions struct {
+	allowClients bool
+}
+
+// AllowClients sets whether a client credentials token (TokenUser.IsClient) is
+// accepted. It is by default. With false, such a token is refused with 403
+// user_required, so only a token issued to a user gets through.
+func AllowClients(allow bool) TokenOption {
+	return func(o *tokenOptions) { o.allowClients = allow }
+}
+
+// RequireTokenWith is RequireToken with options.
+func (v *Verifier) RequireTokenWith(opts ...TokenOption) func(http.Handler) http.Handler {
+	o := tokenOptions{allowClients: true}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, err := v.Authenticate(r)
+			if errors.Is(err, ErrMissingToken) {
+				writeMissingToken(w)
+				return
+			}
+			if err != nil {
+				writeBearerError(w, http.StatusUnauthorized, `Bearer error="invalid_token"`, map[string]string{"error": "invalid_token"})
+				return
+			}
+			if user.IsClient && !o.allowClients {
+				writeBearerError(w, http.StatusForbidden, "", map[string]string{"error": "user_required"})
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tokenUserKey{}, user)))
+		})
+	}
 }

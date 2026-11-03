@@ -42,24 +42,31 @@ type verifyOnlyVectors struct {
 			AMR      []string `json:"amr"`
 			AuthTime *int64   `json:"auth_time"`
 		} `json:"user"`
+		IsClient bool `json:"is_client"`
 	} `json:"verify"`
-	Requests []struct {
-		Name          string  `json:"name"`
-		Authorization *string `json:"authorization"`
-		Guard         *struct {
-			Kind      string   `json:"kind"`
-			Scopes    []string `json:"scopes"`
-			Roles     []string `json:"roles"`
-			ACRValues []string `json:"acr_values"`
-			AMR       []string `json:"amr"`
-			MaxAge    *int64   `json:"max_age"`
-		} `json:"guard"`
-		Expect struct {
-			Status          int             `json:"status"`
-			Body            json.RawMessage `json:"body"`
-			WWWAuthenticate *string         `json:"www_authenticate"`
-		} `json:"expect"`
-	} `json:"requests"`
+	Requests             []vectorRequest `json:"requests"`
+	UserRequiredRequests []vectorRequest `json:"user_required_requests"`
+}
+
+type vectorRequest struct {
+	Name          string  `json:"name"`
+	Authorization *string `json:"authorization"`
+	Auth          *struct {
+		AllowClients *bool `json:"allow_clients"`
+	} `json:"auth"`
+	Guard *struct {
+		Kind      string   `json:"kind"`
+		Scopes    []string `json:"scopes"`
+		Roles     []string `json:"roles"`
+		ACRValues []string `json:"acr_values"`
+		AMR       []string `json:"amr"`
+		MaxAge    *int64   `json:"max_age"`
+	} `json:"guard"`
+	Expect struct {
+		Status          int             `json:"status"`
+		Body            json.RawMessage `json:"body"`
+		WWWAuthenticate *string         `json:"www_authenticate"`
+	} `json:"expect"`
 }
 
 func loadVectors(t *testing.T) verifyOnlyVectors {
@@ -72,7 +79,7 @@ func loadVectors(t *testing.T) verifyOnlyVectors {
 	if err := json.Unmarshal(data, &v); err != nil {
 		t.Fatal(err)
 	}
-	if len(v.Verify) == 0 || len(v.Requests) == 0 {
+	if len(v.Verify) == 0 || len(v.Requests) == 0 || len(v.UserRequiredRequests) == 0 {
 		t.Fatal("no vectors")
 	}
 	return v
@@ -138,8 +145,8 @@ func TestVerifyOnlyVectorsVerify(t *testing.T) {
 			if want.AuthTime != nil {
 				wantAuthTime = time.Unix(*want.AuthTime, 0)
 			}
-			got := []any{user.Subject, user.ClientID, user.Scopes, user.Roles, user.SID, user.OrgID, user.ACR, user.AMR, user.AuthTime.Equal(wantAuthTime), user.AuthTime.IsZero()}
-			expected := []any{want.Sub, want.ClientID, want.Scopes, want.Roles, orEmpty(want.SID), orEmpty(want.OrgID), orEmpty(want.ACR), want.AMR, true, want.AuthTime == nil}
+			got := []any{user.Subject, user.ClientID, user.Scopes, user.Roles, user.SID, user.OrgID, user.ACR, user.AMR, user.AuthTime.Equal(wantAuthTime), user.AuthTime.IsZero(), user.IsClient}
+			expected := []any{want.Sub, want.ClientID, want.Scopes, want.Roles, orEmpty(want.SID), orEmpty(want.OrgID), orEmpty(want.ACR), want.AMR, true, want.AuthTime == nil, vec.IsClient}
 			if !reflect.DeepEqual(got, expected) {
 				t.Fatalf("got %#v, want %#v", got, expected)
 			}
@@ -147,7 +154,9 @@ func TestVerifyOnlyVectorsVerify(t *testing.T) {
 	}
 }
 
-func vectorRoute(t *testing.T, v *Verifier, guardKind string, scopes, roles, acr, amr []string, maxAge *int64) http.Handler {
+// vectorRoute guards the route with RequireToken, or with RequireTokenWith when
+// allowClients is set.
+func vectorRoute(t *testing.T, v *Verifier, allowClients *bool, guardKind string, scopes, roles, acr, amr []string, maxAge *int64) http.Handler {
 	t.Helper()
 	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, found := TokenUserFromContext(r.Context()); !found {
@@ -177,22 +186,39 @@ func vectorRoute(t *testing.T, v *Verifier, guardKind string, scopes, roles, acr
 		t.Fatalf("unknown guard %q", guardKind)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("GET /resource", v.RequireToken(inner))
+	if allowClients == nil {
+		mux.Handle("GET /resource", v.RequireToken(inner))
+	} else {
+		mux.Handle("GET /resource", v.RequireTokenWith(AllowClients(*allowClients))(inner))
+	}
 	return mux
 }
 
 func TestVerifyOnlyVectorsRequests(t *testing.T) {
 	vectors := loadVectors(t)
-	v := vectorVerifier(t, vectors, nil)
-	for _, vec := range vectors.Requests {
+	runVectorRequests(t, vectorVerifier(t, vectors, nil), vectors.Requests)
+}
+
+func TestVerifyOnlyVectorsUserRequiredRequests(t *testing.T) {
+	vectors := loadVectors(t)
+	runVectorRequests(t, vectorVerifier(t, vectors, nil), vectors.UserRequiredRequests)
+}
+
+func runVectorRequests(t *testing.T, v *Verifier, requests []vectorRequest) {
+	t.Helper()
+	for _, vec := range requests {
 		t.Run(vec.Name, func(t *testing.T) {
+			var allowClients *bool
+			if vec.Auth != nil {
+				allowClients = vec.Auth.AllowClients
+			}
 			kind := ""
 			var scopes, roles, acr, amr []string
 			var maxAge *int64
 			if g := vec.Guard; g != nil {
 				kind, scopes, roles, acr, amr, maxAge = g.Kind, g.Scopes, g.Roles, g.ACRValues, g.AMR, g.MaxAge
 			}
-			server := httptest.NewServer(vectorRoute(t, v, kind, scopes, roles, acr, amr, maxAge))
+			server := httptest.NewServer(vectorRoute(t, v, allowClients, kind, scopes, roles, acr, amr, maxAge))
 			defer server.Close()
 
 			req, _ := http.NewRequest(http.MethodGet, server.URL+"/resource", nil)
@@ -231,6 +257,23 @@ func TestVerifyOnlyVectorsRequests(t *testing.T) {
 				t.Fatalf("body %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestRequireTokenWithAllowsClientsByDefault(t *testing.T) {
+	vectors := loadVectors(t)
+	v := vectorVerifier(t, vectors, nil)
+	for name, mw := range map[string]func(http.Handler) http.Handler{
+		"no options":        v.RequireTokenWith(),
+		"AllowClients true": v.RequireTokenWith(AllowClients(true)),
+	} {
+		rec := httptest.NewRecorder()
+		mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})).ServeHTTP(rec, bearerRequest(vectors.Tokens["client_credentials"]))
+		if rec.Code != http.StatusNoContent {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Body)
+		}
 	}
 }
 

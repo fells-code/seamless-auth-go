@@ -189,9 +189,19 @@ mux.Handle("GET /admin", rs.RequireToken(rs.RequireRole("orders:admin")(http.Han
 ```
 
 `RequireToken` puts a `*TokenUser` on the request context (`TokenUserFromContext`): `Subject`,
-`ClientID`, `Scopes`, `Roles`, `SID`, `OrgID`, `ACR`, `AMR` and `AuthTime`. A client credentials
-token is valid too; its `Subject` is the client and it has no user claims, so it can pass a scope
-guard but never a role or step-up guard. `Authenticate` does the same check without answering.
+`ClientID`, `IsClient`, `Scopes`, `Roles`, `SID`, `OrgID`, `ACR`, `AMR` and `AuthTime`. A client
+credentials token is valid too; its `Subject` is the client (`IsClient` is true) and it has no user
+claims, so it can pass a scope guard but never a role or step-up guard. `Authenticate` does the
+same check without answering.
+
+To accept only tokens issued to a user, use `RequireTokenWith(seamlessauth.AllowClients(false))`.
+A client credentials token is then refused with 403 `user_required` once it verifies, before any
+guard inside it runs. `AllowClients` defaults to true, which is what `RequireToken` does.
+
+```go
+userOnly := rs.RequireTokenWith(seamlessauth.AllowClients(false))
+mux.Handle("GET /me/orders", userOnly(rs.RequireScope("orders:read")(http.HandlerFunc(mine))))
+```
 
 The keys come from `<Issuer>/.well-known/openid-configuration`, whose `issuer` must equal
 `Issuer` exactly and whose `jwks_uri` must be https when the issuer is. Set `JWKSURI` to skip
@@ -208,6 +218,7 @@ it, which is where a DPoP proof check goes.
 | --- | --- | --- | --- |
 | No bearer token | 401 | `Bearer` | `{"error":"missing_token"}` |
 | Token does not verify | 401 | `Bearer error="invalid_token"` | `{"error":"invalid_token"}` |
+| Client token, `AllowClients(false)` | 403 | none | `{"error":"user_required"}` |
 | `RequireScope` (every scope) | 403 | `Bearer error="insufficient_scope", scope="..."` | `{"error":"insufficient_scope","scope":"..."}` |
 | `RequireRole` (any role) | 403 | none | `{"error":"insufficient_role"}` |
 | `RequireStepUp` | 401 | RFC 9470 `insufficient_user_authentication` challenge | the same members as JSON |
