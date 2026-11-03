@@ -581,3 +581,14 @@ func TestRoleGrantsAccess(t *testing.T) {
 		}
 	}
 }
+
+// Keys fetched over plain http can be swapped in transit, which would let anyone
+// on the path mint tokens for an https issuer.
+func TestVerifierRefusesAnHTTPJWKSURIUnderAnHTTPSIssuer(t *testing.T) {
+	if _, err := NewVerifier(VerifierOptions{Issuer: "https://login.example", Audience: "a", JWKSURI: "http://keys.internal/jwks"}); err == nil {
+		t.Fatal("accepted an http JWKSURI under an https issuer")
+	}
+	if _, err := NewVerifier(VerifierOptions{Issuer: "http://login.example", Audience: "a", JWKSURI: "http://keys.internal/jwks"}); err != nil {
+		t.Fatalf("refused an http JWKSURI under an http issuer: %v", err)
+	}
+}
