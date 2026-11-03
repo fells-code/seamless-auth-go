@@ -74,19 +74,19 @@ func (a *Adapter) serve(w http.ResponseWriter, r *http.Request) {
 		a.write(w, res, false)
 		return
 	}
-	if res, refused := a.checkContentType(r); refused {
+	path := r.URL.EscapedPath()
+	if res, refused := a.checkContentType(r, path); refused {
 		a.write(w, res, false)
 		return
 	}
 
 	bearer := strings.EqualFold(r.Header.Get(transportHeader), "bearer")
-	path := r.URL.EscapedPath()
 
 	var res result
 	switch {
-	case r.Method == http.MethodPost && strings.EqualFold(path, "/refresh"):
+	case isRefreshRoute(r.Method, path):
 		res = a.refreshRoute(r, bearer)
-	case r.Method == http.MethodDelete && (strings.EqualFold(path, "/logout") || strings.EqualFold(path, "/logout/all")):
+	case isLogoutRoute(r.Method, path):
 		res = a.logoutRoute(r, bearer, path)
 	default:
 		match, ok := a.manifest.get(r.Context()).match(r.Method, path)

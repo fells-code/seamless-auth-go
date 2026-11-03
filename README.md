@@ -148,11 +148,13 @@ The auth routes forward a request body to the auth API as JSON, so a body must b
 cross-site form can post a `text/plain` body shaped like JSON with no CORS preflight, and read as
 JSON it would be a sign-in the user never made.
 
-A state-changing request (anything but `GET`, `HEAD` and `OPTIONS`) must declare a JSON
-`Content-Type` or carry the `X-Seamless-Auth-Transport` header (any value, for example `cookie`)
-even when it has no body, as `POST /auth/refresh` and `DELETE /auth/logout` usually do. Either one
-makes a cross-origin browser request send a CORS preflight, which a form cannot. Without one it
-answers 415 `unsupported_media_type`.
+A state-changing request (anything but `GET`, `HEAD` and `OPTIONS`) to the auth routes must
+declare a JSON `Content-Type` or carry the `X-Seamless-Auth-Transport` header (any value, for
+example `cookie`) even when it has no body. Either one makes a cross-origin browser request send a
+CORS preflight, which a form cannot. Without one it answers 415 `unsupported_media_type`.
+`POST /auth/refresh`, `DELETE /auth/logout` and `DELETE /auth/logout/all` are exempt for now,
+because current clients send them with no body and neither header; they still get the
+cross-site check.
 
 ## Verify-only mode (resource servers)
 

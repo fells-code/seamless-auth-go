@@ -195,16 +195,65 @@ func TestABodyLessUnsafeRequestPassesWithAJSONContentTypeOrTheTransportHeader(t 
 	}
 }
 
-func TestABodyLessLogoutWithoutAContentTypeIsRefused(t *testing.T) {
+// The client sends refresh and logout with no body and neither header, so they
+// pass the content type gate, but still get the origin check.
+func TestBodyLessRefreshAndLogoutSkipTheContentTypeGateButNotTheOriginCheck(t *testing.T) {
 	api := newFakeAPI(t)
 	api.on("DELETE", "/logout", respond(200, map[string]any{"message": "ok"}))
+	api.on("DELETE", "/logout/all", respond(200, map[string]any{"message": "ok"}))
+	refreshes := refreshingAPI(t, api)
+	a := newTestAdapter(t, api, func(o *Options) {
+		o.CookieSameSite = http.SameSiteLaxMode
+		o.AllowedOrigins = []string{"https://app.example.com"}
+	})
+	access := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
+	refresh := withCookie(signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"}))
+	noType := withoutHeader("Content-Type")
+
+	for _, path := range []string{"/logout", "/logout/all"} {
+		if r := do(t, a, "DELETE", path, "", access, noType); r.status != http.StatusNoContent {
+			t.Fatalf("%s: status %d body %v", path, r.status, r.body)
+		}
+	}
+	if r := do(t, a, "POST", "/refresh", "", refresh, noType); r.status != http.StatusOK {
+		t.Fatalf("refresh: status %d body %v", r.status, r.body)
+	}
+
+	for _, origin := range [][]func(*http.Request){
+		{withHeader("Sec-Fetch-Site", "cross-site")},
+		{withHeader("Sec-Fetch-Site", "same-site"), withHeader("Origin", "https://evil.example.com")},
+	} {
+		for _, req := range []struct{ method, path string }{{"DELETE", "/logout"}, {"DELETE", "/logout/all"}, {"POST", "/refresh"}} {
+			r := do(t, a, req.method, req.path, "", append([]func(*http.Request){access, refresh, noType}, origin...)...)
+			if r.status != http.StatusForbidden || r.body["error"] != "cross_site_request_blocked" {
+				t.Fatalf("%s %s: status %d body %v", req.method, req.path, r.status, r.body)
+			}
+		}
+	}
+	if n := len(api.callsTo("DELETE", "/logout")); n != 1 {
+		t.Fatalf("logout reached the auth API %d times", n)
+	}
+	if n := refreshes.Load(); n != 1 {
+		t.Fatalf("refresh reached the auth API %d times", n)
+	}
+}
+
+func TestABodyLessFormPostToAnotherRouteIsStillRefused(t *testing.T) {
+	api := newFakeAPI(t)
+	api.on("POST", "/recovery-codes", respond(200, map[string]any{"ok": true}))
 	a := newTestAdapter(t, api)
 	cookie := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
 
-	if r := do(t, a, "DELETE", "/logout", "", cookie, withoutHeader("Content-Type")); r.status != http.StatusUnsupportedMediaType {
-		t.Fatalf("status %d body %v", r.status, r.body)
+	for _, setup := range [][]func(*http.Request){
+		{withoutHeader("Content-Type")},
+		{withHeader("Content-Type", "application/x-www-form-urlencoded")},
+	} {
+		r := do(t, a, "POST", "/recovery-codes", "", append(setup, cookie)...)
+		if r.status != http.StatusUnsupportedMediaType || r.body["error"] != "unsupported_media_type" {
+			t.Fatalf("status %d body %v", r.status, r.body)
+		}
 	}
-	if n := len(api.callsTo("DELETE", "/logout")); n != 0 {
+	if n := len(api.callsTo("POST", "/recovery-codes")); n != 0 {
 		t.Fatalf("reached the auth API %d times", n)
 	}
 }

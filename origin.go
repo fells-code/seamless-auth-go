@@ -51,11 +51,27 @@ func (a *Adapter) checkOrigin(r *http.Request) (result, bool) {
 // nor carries the transport header. Either one makes a cross-origin browser
 // request send a CORS preflight, which a form cannot, so this holds even when
 // the body is empty and there is nothing for the body check to read.
-func (a *Adapter) checkContentType(r *http.Request) (result, bool) {
+//
+// POST /refresh and DELETE /logout (and /logout/all) are exempt for now: the
+// client sends them with no body and neither header, and refusing them would
+// sign users out when the adapter upgrades ahead of the client. They keep the
+// origin check.
+func (a *Adapter) checkContentType(r *http.Request, path string) (result, bool) {
 	if !isUnsafeMethod(r.Method) || isExplicitJSON(r.Header.Get("Content-Type")) || r.Header.Get(transportHeader) != "" {
 		return result{}, false
 	}
+	if isRefreshRoute(r.Method, path) || isLogoutRoute(r.Method, path) {
+		return result{}, false
+	}
 	return errorResult(http.StatusUnsupportedMediaType, "unsupported_media_type"), true
+}
+
+func isRefreshRoute(method, path string) bool {
+	return method == http.MethodPost && strings.EqualFold(path, "/refresh")
+}
+
+func isLogoutRoute(method, path string) bool {
+	return method == http.MethodDelete && (strings.EqualFold(path, "/logout") || strings.EqualFold(path, "/logout/all"))
 }
 
 func isUnsafeMethod(method string) bool {
