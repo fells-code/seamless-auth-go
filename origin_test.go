@@ -273,3 +273,21 @@ func TestAnEmptyAllowedOriginsIsConfiguredAndStrict(t *testing.T) {
 		}
 	}
 }
+
+// An opaque or sandboxed origin is cross-site whatever else the request says.
+func TestANullOriginIsRefusedBeforeSecFetchSite(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api)
+	for _, site := range []string{"same-site", "same-origin", "none", ""} {
+		for _, origin := range []string{"null", " NULL "} {
+			setup := []func(*http.Request){withHeader("Origin", origin)}
+			if site != "" {
+				setup = append(setup, withHeader("Sec-Fetch-Site", site))
+			}
+			r := do(t, a, "POST", "/magic-link", `{}`, setup...)
+			if r.status != http.StatusForbidden || r.body["error"] != "cross_site_request_blocked" {
+				t.Errorf("Sec-Fetch-Site %s, Origin %q: status %d body %v", site, origin, r.status, r.body)
+			}
+		}
+	}
+}
