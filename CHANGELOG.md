@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.0](https://github.com/fells-code/seamless-auth-go/compare/v0.5.0...v0.6.0) (2026-11-06)
+
+
+### Added
+
+* **guard:** add RequirePermission, organization aware ([#34](https://github.com/fells-code/seamless-auth-go/issues/34)) ([831fcf2](https://github.com/fells-code/seamless-auth-go/commit/831fcf216dcf4050d1dbf26c07a8d9b72673da22)), closes [#29](https://github.com/fells-code/seamless-auth-go/issues/29)
+* let verify-only resource servers require a user ([cee15df](https://github.com/fells-code/seamless-auth-go/commit/cee15df21888c30a92b3f5238a421bc6c0c71f2a))
+* let verify-only resource servers require a user ([5cfebe1](https://github.com/fells-code/seamless-auth-go/commit/5cfebe138107c6ba471593a2e12d643f88c321f4))
+
+
+### Fixed
+
+* check Origin on unsafe methods whatever the SameSite setting ([d8e5a40](https://github.com/fells-code/seamless-auth-go/commit/d8e5a40955394f574b6aa77e63420f0aae76ddd5)), closes [#23](https://github.com/fells-code/seamless-auth-go/issues/23)
+* keep a completed refresh for cookie transport for five seconds ([eb9524f](https://github.com/fells-code/seamless-auth-go/commit/eb9524fe851ae50ce2e46ca650a22c634355b655)), closes [#21](https://github.com/fells-code/seamless-auth-go/issues/21)
+* let body-less refresh and logout through the content type gate ([5447b2e](https://github.com/fells-code/seamless-auth-go/commit/5447b2e5985dcf065fa0c861f913b83ec0524352)), closes [#23](https://github.com/fells-code/seamless-auth-go/issues/23)
+* no refresh replay after rotation, and origin check whatever the SameSite setting ([0d7fbe8](https://github.com/fells-code/seamless-auth-go/commit/0d7fbe886c090de4c3b8a8c802548eb76462884b))
+* refuse a null Origin before checking Sec-Fetch-Site ([a4d4708](https://github.com/fells-code/seamless-auth-go/commit/a4d4708ab63196d6ca6db526555f630591c948de)), closes [#23](https://github.com/fells-code/seamless-auth-go/issues/23)
+* run refresh rotation detached and keep cookies on transport errors ([e8ba2f0](https://github.com/fells-code/seamless-auth-go/commit/e8ba2f0875802e9f6df04a2b0801072624e2c35f)), closes [#22](https://github.com/fells-code/seamless-auth-go/issues/22)
+* share a refresh rotation only while it is in flight ([a569544](https://github.com/fells-code/seamless-auth-go/commit/a569544a816cb17ff754d9105b12c31663e4d7d4)), closes [#21](https://github.com/fells-code/seamless-auth-go/issues/21)
+* sync the bundled adapter manifest with API 0.22.0 ([61514c5](https://github.com/fells-code/seamless-auth-go/commit/61514c517e82245f9dd21bc401f2a1e713f75b71))
+* sync the bundled adapter manifest with API 0.22.0 ([6b4e343](https://github.com/fells-code/seamless-auth-go/commit/6b4e343998bef4f3971f4d76fd2da0ec4a41a5e6))
+* sync the bundled manifest with seamless-auth-api 0.22.0 ([6bf02d7](https://github.com/fells-code/seamless-auth-go/commit/6bf02d71d3129a284d88f2e8c66cc257eb703b0b))
+
 ## [0.5.0](https://github.com/fells-code/seamless-auth-go/compare/v0.4.0...v0.5.0) (2026-11-01)
 
 
