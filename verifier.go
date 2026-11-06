@@ -74,8 +74,17 @@ type TokenUser struct {
 	// SID is the provider's session id.
 	SID   string
 	OrgID string
-	ACR   string
-	AMR   []string
+	// Permissions, OrganizationRoles and OrganizationPermissions are the
+	// permissions, org_roles and org_permissions claims. The provider does not
+	// issue them until seamless-auth-oidc-provider#47, so they are empty today.
+	Permissions             []string
+	OrganizationRoles       []string
+	OrganizationPermissions []string
+	// PermissionsOmitted is the permissions_omitted claim: the lists above are
+	// unknown rather than empty, and RequirePermission refuses the token.
+	PermissionsOmitted bool
+	ACR                string
+	AMR                []string
 	// AuthTime is when the user last authenticated. Zero when the token has no
 	// auth_time.
 	AuthTime  time.Time
@@ -417,6 +426,10 @@ func tokenUserFrom(claims map[string]any) (*TokenUser, error) {
 			return nil, errors.New("org_id is not a string")
 		}
 	}
+	user.Permissions = stringsClaim(claims, "permissions")
+	user.OrganizationRoles = stringsClaim(claims, "org_roles")
+	user.OrganizationPermissions = stringsClaim(claims, "org_permissions")
+	user.PermissionsOmitted = claims["permissions_omitted"] == true
 	if _, present := claims["auth_time"]; present {
 		if user.authTime, ok = numberClaim(claims, "auth_time"); !ok {
 			return nil, errors.New("auth_time is not a number")

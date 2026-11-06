@@ -71,10 +71,18 @@ func main() {
 		}
 		writeJSON(w, entry)
 	})
-	mux.Handle("GET /api/me", adapter.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	me := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, _ := seamlessauth.UserFromContext(r.Context())
 		writeJSON(w, map[string]string{"id": user.ID})
-	})))
+	})
+	mux.Handle("GET /api/me", adapter.RequireAuth(me))
+	mux.Handle("GET /api/permissions/any", adapter.RequirePermission("conformance:read", "conformance:other")(me))
+	mux.Handle("GET /api/permissions/all", adapter.RequirePermissionWith(
+		[]string{"conformance:read", "conformance:write"}, seamlessauth.AllPermissions())(me))
+	mux.Handle("GET /api/permissions/org", adapter.RequirePermissionWith(
+		[]string{"conformance:org"}, seamlessauth.InOrganization())(me))
+	mux.Handle("GET /api/permissions/org/{organizationId}", adapter.RequirePermissionWith(
+		[]string{"conformance:org"}, seamlessauth.InRouteOrganization("organizationId"))(me))
 	mux.Handle("/auth/", http.StripPrefix("/auth", adapter.Handler()))
 
 	addr := ":" + envOr("PORT", "8080")

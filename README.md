@@ -122,6 +122,64 @@ The roles come from the verified access token, never from the cookie. It answers
 No body names the user's roles or the required ones. `RequireRole` panics when given no role or
 an empty one.
 
+### Permissions
+
+`RequirePermission` is `RequireAuth` that also checks the session's permissions. It needs the auth
+API at v0.23 or later, which issues them in the access token. On an older API no token carries
+them, so the guard refuses everyone.
+
+For a route that names an organization, lead with `InRouteOrganization`. Without it, a token for
+organization A passes on `/orgs/B/...`:
+
+```go
+mux.Handle("GET /orgs/{organizationId}/projects", auth.RequirePermissionWith(
+	[]string{"projects:read"}, seamlessauth.InRouteOrganization("organizationId"))(projects))
+
+// At least one of these, from the permissions or org_permissions claim.
+mux.Handle("GET /api/reports", auth.RequirePermission("reports:read", "reports:admin")(reports))
+
+// Every one of these. Each may come from either claim.
+mux.Handle("POST /api/invoices", auth.RequirePermissionWith(
+	[]string{"invoices:read", "invoices:write"}, seamlessauth.AllPermissions())(createInvoice))
+
+// Only the active organization's permissions, whichever organization that is.
+mux.Handle("GET /api/projects", auth.RequirePermissionWith(
+	[]string{"projects:read"}, seamlessauth.InOrganization())(projects))
+```
+
+`InOrganization` counts only `org_permissions` and needs a non-empty `org_id`.
+`InRouteOrganization` also requires the named route parameter to equal `org_id` exactly. It reads
+the parameter with `r.PathValue`, so with a router that does not set it, such as Gin, call
+`r.SetPathValue` in your wrapper first. Options combine: add `AllPermissions()` to either.
+
+Matching is exact and case-sensitive, with no trimming, wildcards or implied grants:
+`invoices:write` does not satisfy `invoices:read`. Roles are not consulted, and organization roles
+never count for `RequireRole`.
+
+| Situation | Status | Body |
+| --- | --- | --- |
+| No session | 401 | `{"error":"unauthenticated"}` |
+| Recovery session, unless `AllowRecoverySessions` is set | 403 | `{"error":"enrollment_required"}` |
+| Cross-site state change on a cookie session | 403 | `{"error":"cross_site_request_blocked"}` |
+| Requirement not met, or an empty list of permissions | 403 | `{"error":"insufficient_permission"}` |
+| Token omits its permissions and the live read fails | 503 | `{"error":"permissions_unavailable"}` |
+| Token omits its permissions and the live read answers 401 | 401 | `{"error":"unauthenticated"}` |
+
+No body names the user's permissions or the required ones. Unlike `RequireRole`, it does not panic
+on an empty list: the route just never opens.
+
+When a token's permissions and organization roles would not fit, the API replaces them with
+`permissions_omitted: true`. For such a token only, the guard calls
+`GET {AuthServerURL}/users/me/permissions` with the caller's access token, on every request, with
+no caching or retry, and evaluates the same rules against the answer, including its organization.
+A non-2xx other than 401, a timeout or a body of the wrong shape is the 503, so it fails closed.
+
+`User.Permissions`, `User.OrganizationRoles` and `User.OrganizationPermissions` come from the
+verified access token, for a cookie or a bearer session alike, and are never read from the cookie.
+A claim that is not an array reads as empty, and entries that are not strings are skipped. When
+`User.PermissionsOmitted` is true the lists are unknown rather than empty, and they are not filled
+in from the live read.
+
 ### Recovery sessions
 
 Redeeming an account recovery code issues a recovery session: its access token carries
@@ -189,7 +247,8 @@ mux.Handle("GET /admin", rs.RequireToken(rs.RequireRole("orders:admin")(http.Han
 ```
 
 `RequireToken` puts a `*TokenUser` on the request context (`TokenUserFromContext`): `Subject`,
-`ClientID`, `IsClient`, `Scopes`, `Roles`, `SID`, `OrgID`, `ACR`, `AMR` and `AuthTime`. A client
+`ClientID`, `IsClient`, `Scopes`, `Roles`, `SID`, `OrgID`, `Permissions`, `OrganizationRoles`,
+`OrganizationPermissions`, `PermissionsOmitted`, `ACR`, `AMR` and `AuthTime`. A client
 credentials token is valid too; its `Subject` is the client (`IsClient` is true) and it has no user
 claims, so it can pass a scope guard but never a role or step-up guard. `Authenticate` does the
 same check without answering.
@@ -221,6 +280,7 @@ it, which is where a DPoP proof check goes.
 | Client token, `AllowClients(false)` | 403 | none | `{"error":"user_required"}` |
 | `RequireScope` (every scope) | 403 | `Bearer error="insufficient_scope", scope="..."` | `{"error":"insufficient_scope","scope":"..."}` |
 | `RequireRole` (any role) | 403 | none | `{"error":"insufficient_role"}` |
+| `RequirePermission` | 403 | none | `{"error":"insufficient_permission"}` |
 | `RequireStepUp` | 401 | RFC 9470 `insufficient_user_authentication` challenge | the same members as JSON |
 
 `RequireRole` matches roles as `@seamless-auth/types` does (`RoleGrantsAccess`): `billing:*` and
@@ -229,6 +289,12 @@ checks `acr` against `ACRValues` (listing `phr` also accepts `phrh`), every meth
 `auth_time` against `MaxAge`, then answers with the `acr_values` and `max_age` the client should
 ask the provider for. Guards go inside `RequireToken`; on their own they answer as a missing
 token.
+
+`RequirePermission` and `RequirePermissionWith` take the same options and match the same way as
+the adapter's. They deny every token today: provider tokens do not carry these claims until
+[seamless-auth-oidc-provider#47](https://github.com/fells-code/seamless-auth-oidc-provider/issues/47).
+`permissions_omitted` is a 403 here, not a live read, because the first-party endpoint refuses
+provider tokens.
 
 With Gin, wrap the middleware:
 
@@ -266,7 +332,7 @@ g.GET("/orders", wrap(rs.RequireToken), wrap(rs.RequireScope("orders:read")), li
 | `RegistrationCookieName`, `PreAuthCookieName` | `seamless-ephemeral` | Sign-in flow cookie names. Logout clears both |
 | `Deliver` | none | Sends OTP codes and magic links through your own transports |
 | `DeliverAccountNotices` | `false` | `Deliver` also sends account notices. See below |
-| `AllowRecoverySessions` | `false` | `RequireAuth` and `RequireRole` admit a recovery session |
+| `AllowRecoverySessions` | `false` | `RequireAuth`, `RequireRole` and `RequirePermission` admit a recovery session |
 | `ResolveClientIP` | the connecting peer | The end user's address. See below |
 | `DisableManifestFetch` | `false` | Use only the manifest bundled with this version |
 | `HTTPClient`, `Logf` | defaults | Outbound client and logger. The client never follows a redirect: a supplied one is copied with a `CheckRedirect` that refuses them, and gets a 15 second timeout if it has none |
