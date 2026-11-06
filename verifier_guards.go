@@ -64,6 +64,28 @@ func (v *Verifier) RequireRole(roles ...string) func(http.Handler) http.Handler 
 	})
 }
 
+// RequirePermission answers 403 insufficient_permission unless the token holds at
+// least one of permissions, in its permissions or org_permissions claim. Matching
+// is exact. Put it inside RequireToken. Provider tokens do not carry these claims
+// until seamless-auth-oidc-provider#47, so today it refuses them. A token with
+// permissions_omitted is refused too: the live read refuses provider tokens.
+func (v *Verifier) RequirePermission(permissions ...string) func(http.Handler) http.Handler {
+	return v.RequirePermissionWith(permissions)
+}
+
+// RequirePermissionWith is RequirePermission with options.
+func (v *Verifier) RequirePermissionWith(permissions []string, opts ...PermissionOption) func(http.Handler) http.Handler {
+	rule := newPermissionRule(permissions, opts)
+	return guard(func(w http.ResponseWriter, r *http.Request, user *TokenUser) bool {
+		held := heldPermissions{user.Permissions, user.OrganizationPermissions, user.OrgID}
+		if !user.PermissionsOmitted && rule.allows(r, held) {
+			return true
+		}
+		writeBearerError(w, http.StatusForbidden, "", map[string]string{"error": "insufficient_permission"})
+		return false
+	})
+}
+
 // StepUp is what RequireStepUp asks of the user's authentication (RFC 9470).
 type StepUp struct {
 	// ACRValues accepts a token whose acr is one of them. Listing "phr" also

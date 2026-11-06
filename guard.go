@@ -15,6 +15,16 @@ type User struct {
 	// OrganizationID is the active organization, the org_id claim of the verified
 	// access token. Empty when the session has none.
 	OrganizationID string
+	// Permissions, OrganizationRoles and OrganizationPermissions are the
+	// permissions, org_roles and org_permissions claims of the verified access
+	// token. Organization roles never count for RequireRole.
+	Permissions             []string
+	OrganizationRoles       []string
+	OrganizationPermissions []string
+	// PermissionsOmitted is a token whose permissions and organization roles did
+	// not fit. The three lists above are then unknown rather than empty, and
+	// RequirePermission reads them from the auth API.
+	PermissionsOmitted bool
 	// Token is the auth API access token, for calling the API on the user's behalf.
 	Token string
 	// Recovery is a session a recovery code issued, before the user enrolled a
@@ -76,6 +86,7 @@ func (a *Adapter) session(r *http.Request) (*User, bool, error) {
 		user.Roles = rolesFrom(inner)
 		user.OrganizationID = stringClaim(inner, "org_id")
 		user.Recovery = inner["recovery"] == true
+		user.readPermissionClaims(inner)
 		return user, true, nil
 	}
 
@@ -90,6 +101,7 @@ func (a *Adapter) session(r *http.Request) (*User, bool, error) {
 	user := userFrom(claims, token)
 	user.OrganizationID = stringClaim(claims, "org_id")
 	user.Recovery = claims["recovery"] == true
+	user.readPermissionClaims(claims)
 	return user, false, nil
 }
 
@@ -119,15 +131,28 @@ func userFrom(claims map[string]any, token string) *User {
 }
 
 func rolesFrom(claims map[string]any) []string {
+	return stringsClaim(claims, "roles")
+}
+
+// stringsClaim reads a claim that is not an array as empty, and skips entries that
+// are not strings.
+func stringsClaim(claims map[string]any, name string) []string {
 	var out []string
-	if roles, ok := claims["roles"].([]any); ok {
-		for _, role := range roles {
-			if s, ok := role.(string); ok {
+	if list, ok := claims[name].([]any); ok {
+		for _, item := range list {
+			if s, ok := item.(string); ok {
 				out = append(out, s)
 			}
 		}
 	}
 	return out
+}
+
+func (u *User) readPermissionClaims(claims map[string]any) {
+	u.Permissions = stringsClaim(claims, "permissions")
+	u.OrganizationRoles = stringsClaim(claims, "org_roles")
+	u.OrganizationPermissions = stringsClaim(claims, "org_permissions")
+	u.PermissionsOmitted = claims["permissions_omitted"] == true
 }
 
 // RequireAuth answers 401 unless the request carries a valid session, and puts
@@ -152,7 +177,7 @@ func (a *Adapter) RequireRole(roles ...string) func(http.Handler) http.Handler {
 		}
 	}
 	roles = append([]string(nil), roles...)
-	allowed := func(user *User) bool {
+	check := func(w http.ResponseWriter, _ *http.Request, user *User) bool {
 		for _, required := range roles {
 			for _, granted := range user.Roles {
 				if RoleGrantsAccess(granted, required) {
@@ -160,14 +185,17 @@ func (a *Adapter) RequireRole(roles ...string) func(http.Handler) http.Handler {
 				}
 			}
 		}
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "insufficient_role"})
 		return false
 	}
 	return func(next http.Handler) http.Handler {
-		return a.requireSession(allowed, next)
+		return a.requireSession(check, next)
 	}
 }
 
-func (a *Adapter) requireSession(allowed func(*User) bool, next http.Handler) http.Handler {
+// requireSession runs check, when given, on the authenticated user. A check that
+// returns false has answered the request.
+func (a *Adapter) requireSession(check func(http.ResponseWriter, *http.Request, *User) bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, byCookie, err := a.authenticate(r)
 		if errors.Is(err, ErrEnrollmentRequired) {
@@ -186,8 +214,7 @@ func (a *Adapter) requireSession(allowed func(*User) bool, next http.Handler) ht
 				return
 			}
 		}
-		if allowed != nil && !allowed(user) {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "insufficient_role"})
+		if check != nil && !check(w, r, user) {
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
