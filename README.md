@@ -94,6 +94,24 @@ for it, and a request presenting the same refresh cookie up to 5 seconds after i
 the same session without another call. A bearer refresh token is shared only while its rotation
 runs; presented again afterwards it goes to the auth API, which treats it as reuse.
 
+#### Running more than one instance
+
+The sharing above is per process. Several adapter instances behind a load balancer can present
+one refresh token to the auth API at once, for example two tabs landing on different instances.
+The auth API covers this with a short replay window: for 5 seconds after a refresh token rotates
+(`REFRESH_REPLAY_WINDOW_SECONDS` on the API, 0 disables it, capped at 60, at most 3 replays),
+a refresh presenting it again gets 200 with the same successor refresh token and session, and an
+access token minted for that call. Every instance then writes the same refresh cookie, so no
+shared lock or cache between instances is needed while the spread between the requests and the
+clock skew between hosts stay under the window.
+
+This needs the auth API release that ships the replay window (seamless-auth-api#613). Against an
+earlier API, the instance that loses the race gets `refresh_token_reused` and the session ends.
+
+Outside the window, past the replay count, or for an older token, the API answers 401
+`refresh_token_reused` and revokes the chain. The adapter treats that as final: it clears the
+session cookies, answers 401 and never retries.
+
 A session cookie is signed with `CookieSecret`, but the auth API access token inside it is
 verified too, the same way as a bearer token: RS256 against the API's JWKS, with the expected
 issuer and audience, in date, of type `access`, and for the cookie's subject. `User.Roles` (and

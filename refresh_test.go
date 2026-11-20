@@ -374,3 +374,117 @@ func TestARefreshTheAuthAPIRefusesClearsTheCookies(t *testing.T) {
 		}
 	}
 }
+
+// replayWindowAPI follows the auth API's refresh contract: concurrent refreshes
+// presenting one refresh token each get the same successor, with an access token
+// minted per call that carries the same sid.
+func replayWindowAPI(t *testing.T, api *fakeAPI) *atomic.Int32 {
+	var n atomic.Int32
+	api.on("POST", "/refresh", func(w http.ResponseWriter, _ *http.Request) {
+		call := n.Add(1)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": "Success",
+			"sub":     "u1",
+			"token": signRS256(t, map[string]any{
+				"sub": "u1", "sid": "s-1", "typ": "access", "jti": fmt.Sprintf("call-%d", call),
+				"iss": api.server.URL, "aud": api.server.URL,
+			}),
+			"refreshToken": "r2",
+			"sessionId":    "s-1",
+			"ttl":          900,
+			"refreshTtl":   3600,
+		})
+	})
+	return &n
+}
+
+// Two adapter instances share no state, so both reach the auth API with the same
+// refresh token. Each must set the same successor cookie and an access cookie for
+// the same session.
+func TestTwoAdapterInstancesRefreshingOneTokenBothSucceedWithTheSameSuccessor(t *testing.T) {
+	api := newFakeAPI(t)
+	refreshes := replayWindowAPI(t, api)
+	instances := []*Adapter{newTestAdapter(t, api), newTestAdapter(t, api)}
+	held := signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"})
+
+	replies := make([]reply, len(instances))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, a := range instances {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			replies[i] = do(t, a, "POST", "/refresh", "", withCookie(held))
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := refreshes.Load(); got != 2 {
+		t.Fatalf("%d refresh calls reached the auth API, want one per instance", got)
+	}
+	for i, r := range replies {
+		if r.status != 200 {
+			t.Fatalf("instance %d: status %d body %v", i, r.status, r.body)
+		}
+	}
+	a, b := replies[0], replies[1]
+	refreshA, refreshB := cookieClaims(t, a.cookies["seamless-refresh"]), cookieClaims(t, b.cookies["seamless-refresh"])
+	if refreshA["refreshToken"] != "r2" || refreshB["refreshToken"] != "r2" {
+		t.Fatalf("refresh cookies carry %v and %v, want r2 from both", refreshA["refreshToken"], refreshB["refreshToken"])
+	}
+	accessA, accessB := cookieClaims(t, a.cookies["seamless-access"]), cookieClaims(t, b.cookies["seamless-access"])
+	if accessA["sessionId"] != "s-1" || accessB["sessionId"] != "s-1" {
+		t.Fatalf("access cookies carry sessions %v and %v, want s-1 from both", accessA["sessionId"], accessB["sessionId"])
+	}
+	for name, body := range map[string]map[string]any{"first": a.body, "second": b.body} {
+		if _, ok := body["token"]; ok {
+			t.Fatalf("%s body carries a token: %v", name, body)
+		}
+		if _, ok := body["refreshToken"]; ok {
+			t.Fatalf("%s body carries a refresh token: %v", name, body)
+		}
+	}
+}
+
+// refresh_token_reused is final: the cookies are cleared and the adapter does
+// not call the auth API again for it.
+func TestRefreshTokenReusedClearsTheCookiesAndIsNotRetried(t *testing.T) {
+	routes := map[string]func(t *testing.T, a *Adapter, held *http.Cookie) reply{
+		"POST /refresh": func(t *testing.T, a *Adapter, held *http.Cookie) reply {
+			return do(t, a, "POST", "/refresh", "", withCookie(held))
+		},
+		"silent refresh": func(t *testing.T, a *Adapter, held *http.Cookie) reply {
+			return do(t, a, "GET", "/users/me", "", withCookie(held))
+		},
+	}
+	for route, call := range routes {
+		t.Run(route, func(t *testing.T) {
+			api := newFakeAPI(t)
+			api.on("POST", "/refresh", respond(401, map[string]any{"error": "refresh_token_reused"}))
+			a := newTestAdapter(t, api)
+			held := signedCookie(t, "seamless-refresh", map[string]any{"sub": "u1", "refreshToken": "r1"})
+
+			r := call(t, a, held)
+
+			if r.status != 401 {
+				t.Fatalf("status %d body %v", r.status, r.body)
+			}
+			for _, name := range []string{"seamless-access", "seamless-refresh"} {
+				if c := r.cookies[name]; c == nil || c.MaxAge >= 0 {
+					t.Fatalf("%s not cleared: %+v", name, c)
+				}
+			}
+			if got := len(api.callsTo("POST", "/refresh")); got != 1 {
+				t.Fatalf("%d refresh calls, want 1 with no retry", got)
+			}
+			if r2 := call(t, a, held); r2.status != 401 {
+				t.Fatalf("second attempt: status %d", r2.status)
+			}
+			if got := len(api.callsTo("POST", "/refresh")); got != 2 {
+				t.Fatalf("%d refresh calls after a second attempt, want 2 (nothing kept from a rejection)", got)
+			}
+		})
+	}
+}
