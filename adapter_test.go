@@ -31,7 +31,7 @@ func TestLoginStoresThePreAuthTokenAndPicksTheBody(t *testing.T) {
 		t.Fatalf("picked field missing: %v", r.body)
 	}
 	c := r.cookies["seamless-ephemeral"]
-	if c == nil || c.MaxAge != 300 || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteNoneMode || c.Path != "/" {
+	if c == nil || c.MaxAge != 300 || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode || c.Path != "/" {
 		t.Fatalf("pre-auth cookie: %+v", c)
 	}
 }

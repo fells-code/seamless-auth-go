@@ -215,10 +215,14 @@ new access cookie no longer carries it. A bearer client holds its own refresh to
 A request `RequireAuth` admits on the session cookie also gets the auth routes' cross-site
 check: whatever `CookieSameSite` is, a state-changing request from another site answers 403
 `cross_site_request_blocked` (a sibling subdomain is same-site, so even `SameSite=Lax` cookies
-ride along on its form POST). That is `Sec-Fetch-Site: cross-site`; or an `Origin` of `null`; or,
-with `AllowedOrigins` set, `Sec-Fetch-Site: same-site` (which also covers a sibling subdomain) from an
-`Origin` that is missing or not on the list; or, from a browser that sends no `Sec-Fetch-Site`,
-an `Origin` outside `AllowedOrigins`. Without `AllowedOrigins`, a same-site request passes. A
+ride along on its form POST). That is `Sec-Fetch-Site: cross-site`, or a `Sec-Fetch-Site` value
+the check does not know; or an `Origin` of `null`; or `Sec-Fetch-Site: same-site` (which also
+covers a sibling subdomain), or a request with no `Sec-Fetch-Site` that carries an `Origin`, whose
+`Origin` is not trusted. With `AllowedOrigins` set, a trusted `Origin` is one on the list. Without
+it, a trusted `Origin` names the request's `Host` (scheme default ports aside), so a same-site
+request with no `Origin`, or from a sibling subdomain, is refused. Behind a proxy that rewrites
+`Host`, set `AllowedOrigins`: `X-Forwarded-Host` is not consulted. A request with no `Origin` and
+no `Sec-Fetch-Site` (a server, not a browser) passes. A
 non-nil empty `AllowedOrigins` is set, and allows no origin. A bearer token is never attached by a browser, so it is not checked. `Authenticate` makes no such
 check.
 
@@ -344,8 +348,8 @@ g.GET("/orders", wrap(rs.RequireToken), wrap(rs.RequireScope("orders:read")), li
 | `JWKSKid` | `dev-main` | `kid` header on service tokens |
 | `CookieDomain` | none | Cookie `Domain` |
 | `InsecureCookies` | `false` | Drops `Secure`, for local development over HTTP. Also lets placeholder secrets through, with a warning |
-| `CookieSameSite` | `None`, or `Lax` with `InsecureCookies` | Cookie `SameSite` |
-| `AllowedOrigins` | none (nil) | The only cross-origin and same-site callers allowed to change state, whatever `CookieSameSite` is. An empty non-nil list allows none |
+| `CookieSameSite` | `Lax` | Cookie `SameSite`. Set `None` only for a frontend on another site, and name it in `AllowedOrigins` |
+| `AllowedOrigins` | none (nil): an `Origin` must name the request's `Host` | The only cross-origin and same-site callers allowed to change state, whatever `CookieSameSite` is. An empty non-nil list allows none |
 | `AccessCookieName`, `RefreshCookieName` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `RegistrationCookieName`, `PreAuthCookieName` | `seamless-ephemeral` | Sign-in flow cookie names. Logout clears both |
 | `Deliver` | none | Sends OTP codes and magic links through your own transports |
