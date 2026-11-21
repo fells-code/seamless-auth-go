@@ -27,7 +27,12 @@ func TestTheOriginGuard(t *testing.T) {
 		{"cross-site", open, "POST", []func(*http.Request){site("cross-site")}, true},
 		{"cross-site, any case", open, "POST", []func(*http.Request){site("Cross-Site")}, true},
 		{"same-origin", open, "POST", []func(*http.Request){site("same-origin")}, false},
-		{"same-site without an allowlist", open, "POST", []func(*http.Request){site("same-site")}, false},
+		{"same-site without an allowlist, no origin", open, "POST", []func(*http.Request){site("same-site")}, true},
+		{"same-site without an allowlist, sibling origin", open, "POST", []func(*http.Request){site("same-site"), origin("https://evil.example.com")}, true},
+		{"same-site without an allowlist, origin names the host", open, "POST", []func(*http.Request){site("same-site"), origin("https://EXAMPLE.com")}, false},
+		{"unknown Sec-Fetch-Site", open, "POST", []func(*http.Request){site("cross-origin")}, true},
+		{"unknown Sec-Fetch-Site, origin names the host", open, "POST", []func(*http.Request){site("bogus"), origin("https://example.com")}, true},
+		{"none", open, "POST", []func(*http.Request){site("none")}, false},
 		{"server to server", open, "POST", nil, false},
 		{"null origin", open, "POST", []func(*http.Request){origin("null")}, true},
 		{"cross-site read", open, "GET", []func(*http.Request){site("cross-site")}, false},
@@ -35,7 +40,12 @@ func TestTheOriginGuard(t *testing.T) {
 
 		{"no Sec-Fetch-Site, listed origin", listed, "POST", []func(*http.Request){origin("https://app.example.com")}, false},
 		{"no Sec-Fetch-Site, other origin", listed, "POST", []func(*http.Request){origin("https://evil.example.com")}, true},
-		{"no Sec-Fetch-Site, any origin without an allowlist", open, "POST", []func(*http.Request){origin("https://evil.example.com")}, false},
+		{"no Sec-Fetch-Site, other origin without an allowlist", open, "POST", []func(*http.Request){origin("https://evil.example.com")}, true},
+		{"no Sec-Fetch-Site, origin names the host", open, "POST", []func(*http.Request){origin("https://example.com")}, false},
+		{"no Sec-Fetch-Site, origin names the host with its default port", open, "POST", []func(*http.Request){origin("https://example.com:443")}, false},
+		{"no Sec-Fetch-Site, origin names another port", open, "POST", []func(*http.Request){origin("https://example.com:8443")}, true},
+		{"no Sec-Fetch-Site, unparseable origin without an allowlist", open, "POST", []func(*http.Request){origin("not an origin")}, true},
+		{"no Sec-Fetch-Site, host origin not on the allowlist", listed, "POST", []func(*http.Request){origin("https://example.com")}, true},
 
 		// A sibling subdomain is same-site, so the header alone cannot tell it from the app.
 		{"same-site, other origin", listed, "POST", []func(*http.Request){site("same-site"), origin("https://evil.example.com")}, true},
@@ -145,12 +155,12 @@ func TestTheGuardChecksASameSiteCookieRequestUnderLaxCookies(t *testing.T) {
 }
 
 // A body-less form POST carries no JSON body for the content type check to look
-// at. Without an allowlist, and from a sibling subdomain or a browser that sends
-// no fetch metadata, nothing else stops it reaching a cookie-authenticated route.
+// at. From the app's own origin, or a browser that sends no fetch metadata or
+// Origin, nothing else stops it reaching a cookie-authenticated route.
 func TestABodyLessFormPostNeedsAJSONContentTypeOrACustomHeader(t *testing.T) {
 	for name, mutate := range map[string]func(*Options){
 		"lax":  func(o *Options) { o.CookieSameSite = http.SameSiteLaxMode },
-		"none": func(o *Options) {},
+		"none": func(o *Options) { o.CookieSameSite = http.SameSiteNoneMode },
 	} {
 		for _, routePath := range []string{"/recovery-codes", "/totp/enroll/start", "/admin/applications/app-1/secret"} {
 			for _, site := range []string{"same-site", ""} {
@@ -163,7 +173,8 @@ func TestABodyLessFormPostNeedsAJSONContentTypeOrACustomHeader(t *testing.T) {
 						withHeader("Content-Type", "application/x-www-form-urlencoded"),
 					}
 					if site != "" {
-						setup = append(setup, withHeader("Sec-Fetch-Site", site))
+						// Same-site from the app's own Host, so the origin check lets it through.
+						setup = append(setup, withHeader("Sec-Fetch-Site", site), withHeader("Origin", "https://example.com"))
 					}
 
 					r := do(t, a, "POST", routePath, "", setup...)
@@ -289,5 +300,47 @@ func TestANullOriginIsRefusedBeforeSecFetchSite(t *testing.T) {
 				t.Errorf("Sec-Fetch-Site %s, Origin %q: status %d body %v", site, origin, r.status, r.body)
 			}
 		}
+	}
+}
+
+// Without AllowedOrigins, a sibling subdomain's form POST used to pass the guard
+// on a session cookie. Its Origin now has to name the request's Host.
+func TestTheGuardRefusesASiblingOriginWithoutAnAllowlist(t *testing.T) {
+	api := newFakeAPI(t)
+	a := newTestAdapter(t, api)
+	cookie := withCookie(signedCookie(t, "seamless-access", map[string]any{"sub": "u1", "token": apiToken(t, api, "u1", "access")}))
+	post := func(r *http.Request) { r.Method = http.MethodPost }
+
+	for _, setup := range [][]func(*http.Request){
+		{withHeader("Sec-Fetch-Site", "same-site"), withHeader("Origin", "https://evil.example.com")},
+		{withHeader("Origin", "https://evil.example.com")},
+	} {
+		rec := call(guarded(a), append([]func(*http.Request){post, cookie}, setup...)...)
+		if rec.Code != 403 || !strings.Contains(rec.Body.String(), "cross_site_request_blocked") {
+			t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := call(guarded(a), post, cookie, withHeader("Sec-Fetch-Site", "same-site"), withHeader("Origin", "https://example.com"))
+	if rec.Code == 403 {
+		t.Fatalf("same-host request refused: %s", rec.Body.String())
+	}
+}
+
+func TestCookiesDefaultToSameSiteLax(t *testing.T) {
+	for name, mutate := range map[string]func(*Options){
+		"secure":   func(o *Options) {},
+		"insecure": func(o *Options) { o.InsecureCookies = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := newTestAdapter(t, newFakeAPI(t), mutate)
+			if a.opts.CookieSameSite != http.SameSiteLaxMode {
+				t.Fatalf("CookieSameSite %v, want Lax", a.opts.CookieSameSite)
+			}
+		})
+	}
+	a := newTestAdapter(t, newFakeAPI(t), func(o *Options) { o.CookieSameSite = http.SameSiteNoneMode })
+	if a.opts.CookieSameSite != http.SameSiteNoneMode {
+		t.Fatalf("an explicit None was overridden: %v", a.opts.CookieSameSite)
 	}
 }

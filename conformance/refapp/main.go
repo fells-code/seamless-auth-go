@@ -35,6 +35,8 @@ func main() {
 		CookieSecret:     os.Getenv("COOKIE_SIGNING_KEY"),
 		ServiceSecret:    os.Getenv("SEAMLESS_SERVICE_TOKEN"),
 		JWKSKid:          os.Getenv("JWKS_KID"),
+		// The conformance contract holds the reference app to SameSite=None.
+		CookieSameSite: http.SameSiteNoneMode,
 		Deliver: func(_ context.Context, d seamlessauth.Delivery) error {
 			mu.Lock()
 			defer mu.Unlock()

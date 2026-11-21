@@ -11,11 +11,11 @@ import (
 // its form POST.
 //
 // Sec-Fetch-Site is the primary signal, since page script cannot forge it:
-// cross-site is refused, as is an Origin of null before anything else.
-// same-site also covers a sibling subdomain, so with
-// AllowedOrigins set its Origin must be on the list too. Without the header,
-// Origin is matched against AllowedOrigins when they are set. A non-nil empty
-// AllowedOrigins is set, and allows no origin.
+// cross-site, or a value this check does not know, is refused, as is an Origin
+// of null before anything else. same-site also covers a sibling subdomain, so
+// its Origin must be on AllowedOrigins when they are set, or name the request's
+// Host when they are not. Without the header, an Origin is held to the same
+// rule. A non-nil empty AllowedOrigins is set, and allows no origin.
 func (a *Adapter) checkOrigin(r *http.Request) (result, bool) {
 	if !isUnsafeMethod(r.Method) {
 		return result{}, false
@@ -23,7 +23,6 @@ func (a *Adapter) checkOrigin(r *http.Request) (result, bool) {
 
 	blocked := errorResult(http.StatusForbidden, "cross_site_request_blocked")
 	origin := r.Header.Get("Origin")
-	listed := a.opts.AllowedOrigins != nil
 
 	// An opaque or sandboxed origin is cross-site, whatever Sec-Fetch-Site says.
 	if strings.EqualFold(strings.TrimSpace(origin), "null") {
@@ -31,23 +30,49 @@ func (a *Adapter) checkOrigin(r *http.Request) (result, bool) {
 	}
 
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
-		switch {
-		case strings.EqualFold(site, "cross-site"):
-			return blocked, true
-		case strings.EqualFold(site, "same-site") && listed:
-			return blocked, !a.isAllowedOrigin(origin)
-		default:
+		switch strings.ToLower(strings.TrimSpace(site)) {
+		case "same-origin", "none":
 			return result{}, false
+		case "same-site":
+			return blocked, !a.isTrustedOrigin(origin, r.Host)
+		default:
+			return blocked, true
 		}
 	}
 
 	if origin == "" {
 		return result{}, false
 	}
-	if !listed {
-		return result{}, false
+	return blocked, !a.isTrustedOrigin(origin, r.Host)
+}
+
+// isTrustedOrigin matches origin against AllowedOrigins when they are set, and
+// otherwise against the request's Host. Host is what the browser addressed, so
+// behind a proxy that rewrites it the app must set AllowedOrigins.
+// X-Forwarded-Host is not consulted: nothing here can tell a proxy's from a
+// client's.
+func (a *Adapter) isTrustedOrigin(origin, host string) bool {
+	if a.opts.AllowedOrigins != nil {
+		return a.isAllowedOrigin(origin)
 	}
-	return blocked, !a.isAllowedOrigin(origin)
+	u, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || u.Scheme == "" || u.Host == "" || host == "" {
+		return false
+	}
+	return stripDefaultPort(u.Host, u.Scheme) == stripDefaultPort(host, u.Scheme)
+}
+
+// stripDefaultPort lowercases host and drops the scheme's default port, so
+// "example.com:443" from an https origin names the same host as "example.com".
+func stripDefaultPort(host, scheme string) string {
+	host = strings.ToLower(host)
+	switch {
+	case strings.EqualFold(scheme, "https") && strings.HasSuffix(host, ":443"):
+		return strings.TrimSuffix(host, ":443")
+	case strings.EqualFold(scheme, "http") && strings.HasSuffix(host, ":80"):
+		return strings.TrimSuffix(host, ":80")
+	}
+	return host
 }
 
 // checkContentType refuses an unsafe request that neither declares a JSON body

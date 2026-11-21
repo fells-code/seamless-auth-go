@@ -37,13 +37,15 @@ type Options struct {
 	// InsecureCookies drops the Secure attribute, for local development over HTTP.
 	// It also lets the placeholder secrets from the examples through.
 	InsecureCookies bool
-	// CookieSameSite defaults to None for secure cookies and Lax otherwise.
+	// CookieSameSite defaults to Lax. Set None only for a frontend on another
+	// site, which also needs AllowedOrigins to name it.
 	CookieSameSite http.SameSite
 	// AllowedOrigins, when set, is the only origins allowed to make
 	// state-changing requests, whatever CookieSameSite is. A request marked
 	// Sec-Fetch-Site: same-site, or one without Sec-Fetch-Site that carries an
-	// Origin, must then carry an Origin on the list. A non-nil empty slice is set
-	// and allows no origin; leave it nil to not configure one.
+	// Origin, must then carry an Origin on the list. Left nil, that Origin must
+	// name the request's Host instead. A non-nil empty slice is set and allows
+	// no origin.
 	AllowedOrigins []string
 
 	AccessCookieName       string
@@ -142,11 +144,7 @@ func (o Options) withDefaults() (Options, error) {
 		o.Logf("[seamless-auth] JWKSKid is not set and defaults to %q, a placeholder. Set it to name the service-token key explicitly.", o.JWKSKid)
 	}
 	if o.CookieSameSite == 0 || o.CookieSameSite == http.SameSiteDefaultMode {
-		if o.InsecureCookies {
-			o.CookieSameSite = http.SameSiteLaxMode
-		} else {
-			o.CookieSameSite = http.SameSiteNoneMode
-		}
+		o.CookieSameSite = http.SameSiteLaxMode
 	}
 	if o.AccessCookieName == "" {
 		o.AccessCookieName = "seamless-access"
