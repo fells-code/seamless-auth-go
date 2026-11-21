@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/fells-code/seamless-auth-go/compare/v0.6.0...v0.7.0) (2026-11-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **csrf:** an app that serves its frontend from another origin (a sibling subdomain or another site) and relied on the open default must now list that origin in AllowedOrigins, and a frontend on another site must also set CookieSameSite to http.SameSiteNoneMode. Behind a proxy that rewrites Host, set AllowedOrigins; X-Forwarded-Host is not consulted.
+
+### Fixed
+
+* **csrf:** require Origin to match Host without an allow-list and default to SameSite=Lax ([#42](https://github.com/fells-code/seamless-auth-go/issues/42)) ([05148a9](https://github.com/fells-code/seamless-auth-go/commit/05148a97a422e5b568b512a8a920cb1cb1d9651a)), closes [#36](https://github.com/fells-code/seamless-auth-go/issues/36)
+* document and test concurrent refresh across adapter instances ([#39](https://github.com/fells-code/seamless-auth-go/issues/39)) ([acaed3a](https://github.com/fells-code/seamless-auth-go/commit/acaed3a18c9d3b7b08a2f4891854e7c0beeb8f87)), closes [#37](https://github.com/fells-code/seamless-auth-go/issues/37)
+* **manifest:** sync the bundled adapter manifest with the API ([#40](https://github.com/fells-code/seamless-auth-go/issues/40)) ([bf2cf54](https://github.com/fells-code/seamless-auth-go/commit/bf2cf54c7b54788572cba3541878f3c4c2574368))
+
 ## [0.6.0](https://github.com/fells-code/seamless-auth-go/compare/v0.5.0...v0.6.0) (2026-11-06)
 
 
